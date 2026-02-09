@@ -1,0 +1,29 @@
+{
+  "commodity": "GOLD",
+  "spot_price": 75000.0,
+  "atm_strike": 75000,
+  "expiry": "26MAR26",
+  "exchange": "MCX",
+  "segment": 51,
+  "call": {
+    "symbol": "GOLDM (Estimated) 75000 CE",
+    "type": "CE",
+    "strike": 75000,
+    "ltp": 1875.0,
+    "bid": 1837.5,
+    "ask": 1912.5,
+    "status": "estimated",
+    "note": "Estimated price - Real-time MCX data unavailable via XTS REST API"
+  },
+  "put": {
+    "symbol": "GOLDM (Estimated) 75000 PE",
+    "type": "PE",
+    "strike": 75000,
+    "ltp": 1875.0,
+    "bid": 1837.5,
+    "ask": 1912.5,
+    "status": "estimated",
+    "note": "Estimated price - Real-time MCX data unavailable via XTS REST API"
+  },
+  "note": "Some prices may be estimated due to API limitations"
+}

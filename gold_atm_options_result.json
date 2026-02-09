@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-02-09T17:44:24.582263",
+  "spot_price": 75000.0,
+  "atm_strike": 75000,
+  "expiry": "26Mar2026",
+  "call": {
+    "symbol": "GOLDM 26Mar2026 75000 CE",
+    "ltp": 1875.0,
+    "estimated": true
+  },
+  "put": {
+    "symbol": "GOLDM 26Mar2026 75000 PE",
+    "ltp": 1875.0,
+    "estimated": true
+  },
+  "note": "Estimated values - MCX options data not available via API"
+}

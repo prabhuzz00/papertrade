@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-02-09T18:02:07.951740",
+  "spot_price": 25867.3,
+  "expiry": "10Feb2026",
+  "atm_strike": 25850,
+  "calls": [
+    {
+      "strike": 25750,
+      "instrument_id": 42532,
+      "display_name": "NIFTY 10FEB2026 CE 25750",
+      "ltp": 145.35,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 137100600,
+      "lot_size": 65
+    },
+    {
+      "strike": 25800,
+      "instrument_id": 42536,
+      "display_name": "NIFTY 10FEB2026 CE 25800",
+      "ltp": 108.1,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 506554815,
+      "lot_size": 65
+    },
+    {
+      "strike": 25850,
+      "instrument_id": 42538,
+      "display_name": "NIFTY 10FEB2026 CE 25850",
+      "ltp": 77.7,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 517298600,
+      "lot_size": 65
+    },
+    {
+      "strike": 25900,
+      "instrument_id": 42540,
+      "display_name": "NIFTY 10FEB2026 CE 25900",
+      "ltp": 54.6,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 550237740,
+      "lot_size": 65
+    },
+    {
+      "strike": 25950,
+      "instrument_id": 42544,
+      "display_name": "NIFTY 10FEB2026 CE 25950",
+      "ltp": 37.5,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 257117120,
+      "lot_size": 65
+    }
+  ],
+  "puts": [
+    {
+      "strike": 25750,
+      "instrument_id": 42535,
+      "display_name": "NIFTY 10FEB2026 PE 25750",
+      "ltp": 32.4,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 271481015,
+      "lot_size": 65
+    },
+    {
+      "strike": 25800,
+      "instrument_id": 42537,
+      "display_name": "NIFTY 10FEB2026 PE 25800",
+      "ltp": 45.25,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 620134645,
+      "lot_size": 65
+    },
+    {
+      "strike": 25850,
+      "instrument_id": 42539,
+      "display_name": "NIFTY 10FEB2026 PE 25850",
+      "ltp": 64.25,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 426374000,
+      "lot_size": 65
+    },
+    {
+      "strike": 25900,
+      "instrument_id": 42543,
+      "display_name": "NIFTY 10FEB2026 PE 25900",
+      "ltp": 91.35,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 297505520,
+      "lot_size": 65
+    },
+    {
+      "strike": 25950,
+      "instrument_id": 42545,
+      "display_name": "NIFTY 10FEB2026 PE 25950",
+      "ltp": 124.25,
+      "bid": 0.0,
+      "ask": 0.0,
+      "volume": 72891715,
+      "lot_size": 65
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "spot_price": 25867.3,
+  "atm_strike": 25850,
+  "expiry": "24FEB26",
+  "call": {
+    "symbol": "NIFTY 24FEB26 25850 CE",
+    "type": "CE",
+    "strike": 25850,
+    "error": "Could not fetch real-time data"
+  },
+  "put": {
+    "symbol": "NIFTY 24FEB26 25850 PE",
+    "type": "PE",
+    "strike": 25850,
+    "error": "Could not fetch real-time data"
+  }
+}
