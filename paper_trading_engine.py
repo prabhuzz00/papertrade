@@ -108,18 +108,22 @@ class PaperTradingEngine:
     
     def open_position(self, signal_type: str, entry_price: float, 
                      stop_loss: float, target: float, quantity: int,
-                     strategy: str, notes: str = "") -> Optional[Trade]:
+                     strategy: str, notes: str = "",
+                     strike: int = 0, option_type: str = "", spot_price: float = 0) -> Optional[Trade]:
         """
         Open a new position
         
         Args:
             signal_type: 'CALL' or 'PUT'
-            entry_price: Entry price
+            entry_price: Entry price (option premium for options)
             stop_loss: Stop loss price
             target: Target price
             quantity: Number of shares/contracts
             strategy: Strategy name
             notes: Additional notes
+            strike: Option strike price
+            option_type: 'CE' or 'PE'
+            spot_price: Spot price at entry
         
         Returns:
             Trade object if successful, None otherwise
@@ -142,7 +146,10 @@ class PaperTradingEngine:
             stop_loss=stop_loss,
             target=target,
             strategy=strategy,
-            notes=notes
+            notes=notes,
+            strike=strike,
+            option_type=option_type,
+            spot_price=spot_price
         )
         
         # Deduct margin

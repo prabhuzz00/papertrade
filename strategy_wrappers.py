@@ -731,3 +731,126 @@ class MeanReversionStrategy:
     def get_info(self):
         """Get strategy information"""
         return self.description
+
+
+class EMACrossoverStrategy:
+    """
+    EMA Crossover Strategy
+    9 EMA crosses 21 EMA for entry signals
+    """
+    
+    def __init__(self):
+        self.name = "EMA Crossover"
+        self.description = """
+        <h3>EMA Crossover Strategy</h3>
+        <p><b>Entry Rules:</b></p>
+        <ul>
+            <li><b>CALL:</b> 9 EMA crosses above 21 EMA (bullish crossover)</li>
+            <li><b>PUT:</b> 9 EMA crosses below 21 EMA (bearish crossover)</li>
+        </ul>
+        <p><b>Risk/Reward:</b> 1:3 ratio - Stop loss based on ATR, target 3x the risk</p>
+        <p><b>Indicators:</b> 9 EMA, 21 EMA, ATR for stop loss</p>
+        """
+        self.prev_ema9 = None
+        self.prev_ema21 = None
+    
+    def calc_atr(self, data, period=14):
+        """Calculate Average True Range"""
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - data['Close'].shift())
+        low_close = np.abs(data['Low'] - data['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        return true_range.rolling(period).mean()
+    
+    def calc_ema(self, data, period):
+        """Calculate Exponential Moving Average"""
+        return data['Close'].ewm(span=period, adjust=False).mean()
+    
+    def add_indicators(self, df):
+        """Add all technical indicators to dataframe"""
+        df['EMA_9'] = self.calc_ema(df, 9)
+        df['EMA_21'] = self.calc_ema(df, 21)
+        df['ATR'] = self.calc_atr(df)
+        return df
+    
+    def get_signal(self, df):
+        """Get current trading signal"""
+        if len(df) < 30:
+            return None
+        
+        # Add indicators if not present
+        if 'EMA_9' not in df.columns:
+            df = self.add_indicators(df)
+        
+        # Get current and previous values
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        # Extract values
+        try:
+            close = current['Close'].item() if hasattr(current['Close'], 'item') else current['Close']
+            ema9_current = current['EMA_9'].item() if hasattr(current['EMA_9'], 'item') else current['EMA_9']
+            ema21_current = current['EMA_21'].item() if hasattr(current['EMA_21'], 'item') else current['EMA_21']
+            ema9_prev = previous['EMA_9'].item() if hasattr(previous['EMA_9'], 'item') else previous['EMA_9']
+            ema21_prev = previous['EMA_21'].item() if hasattr(previous['EMA_21'], 'item') else previous['EMA_21']
+            atr = current['ATR'].item() if hasattr(current['ATR'], 'item') else current['ATR']
+            
+            if pd.isna(ema9_current) or pd.isna(ema21_current) or pd.isna(atr):
+                print("[ERROR] Invalid indicators (NaN values)")
+                return None
+        except (ValueError, TypeError, KeyError) as e:
+            print(f"[ERROR] Error extracting indicators: {e}")
+            return None
+        
+        signal_info = None
+        
+        print(f"[EMA CROSSOVER] Close: {close:.2f}, EMA9: {ema9_current:.2f}, EMA21: {ema21_current:.2f}, ATR: {atr:.2f}")
+        
+        # Detect bullish crossover (9 EMA crosses above 21 EMA)
+        if ema9_prev <= ema21_prev and ema9_current > ema21_current:
+            entry_price = close
+            stop_loss = entry_price - (atr * 1.0)  # 1 ATR stop loss
+            risk = entry_price - stop_loss
+            target = entry_price + (risk * 3.0)  # 1:3 risk/reward ratio
+            
+            signal_info = {
+                'signal': 'CALL',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': min(1.0, abs(ema9_current - ema21_current) / atr),
+                'reason': f'Bullish EMA Crossover - 9 EMA crossed above 21 EMA',
+                'atr': atr
+            }
+            print(f"[CALL SIGNAL] Bullish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
+        
+        # Detect bearish crossover (9 EMA crosses below 21 EMA)
+        elif ema9_prev >= ema21_prev and ema9_current < ema21_current:
+            entry_price = close
+            stop_loss = entry_price + (atr * 1.0)  # 1 ATR stop loss
+            risk = stop_loss - entry_price
+            target = entry_price - (risk * 3.0)  # 1:3 risk/reward ratio
+            
+            signal_info = {
+                'signal': 'PUT',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': min(1.0, abs(ema9_current - ema21_current) / atr),
+                'reason': f'Bearish EMA Crossover - 9 EMA crossed below 21 EMA',
+                'atr': atr
+            }
+            print(f"[PUT SIGNAL] Bearish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
+        else:
+            # No crossover detected
+            if ema9_current > ema21_current:
+                print(f"[WAITING] 9 EMA above 21 EMA (bullish trend) - waiting for crossover")
+            else:
+                print(f"[WAITING] 9 EMA below 21 EMA (bearish trend) - waiting for crossover")
+        
+        return signal_info
+    
+    def get_info(self):
+        """Get strategy information"""
+        return self.description

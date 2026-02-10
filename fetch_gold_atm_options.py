@@ -1,6 +1,15 @@
 """
-Fetch Gold ATM Option Prices using XTS GetOptionSymbol API
-Uses the proper GetOptionSymbol endpoint to get numeric instrument IDs
+Fetch Gold ATM Option Prices using XTS API
+Uses instrument master download to get numeric instrument IDs,
+then fetches real-time quotes via the quotes endpoint.
+
+KEY FINDINGS (from debugging):
+- GetOptionSymbol endpoint does NOT work for MCX options (segment 51)
+- Instrument master via POST /instruments/master works for MCXFO
+- GOLDM futures trade around Rs.155,000-162,000 (not 75,000)
+- GOLDM option lot size = 10, GOLD lot size = 100
+- Strikes are in 100-point increments
+- opt_type_code in master: 3=CE, 4=PE
 """
 
 import requests
@@ -13,7 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class GoldATMOptionFetcher:
-    """Fetch Gold ATM option prices using GetOptionSymbol for numeric instrument IDs"""
+    """Fetch Gold ATM option prices using instrument master for numeric IDs"""
     
     def __init__(self):
         self.token = None
@@ -21,6 +30,7 @@ class GoldATMOptionFetcher:
         self.app_key = XTS_APP_KEY
         self.secret_key = XTS_SECRET_KEY
         self.source = XTS_SOURCE
+        self.instrument_cache = {}  # {(strike, 'CE'/'PE'): instrument_info}
     
     def login(self):
         """Login to XTS API"""
@@ -52,151 +62,168 @@ class GoldATMOptionFetcher:
             print(f"✗ Login error: {e}")
             return False
     
-    def get_gold_future_symbol(self, segment=51):
-        """Get Gold future symbol using GetFutureSymbol endpoint"""
+    def download_mcxfo_master(self):
+        """
+        Download MCXFO instrument master via POST endpoint.
+        This is the ONLY reliable way to get MCX option instrument IDs.
+        GetOptionSymbol does NOT work for MCX.
+        
+        Returns:
+            List of pipe-delimited instrument record strings, or None
+        """
         if not self.token:
             self.login()
         
-        url = f"{self.base_url}/instruments/instrument/futureSymbol"
-        headers = {'Authorization': self.token}
+        url = f"{self.base_url}/instruments/master"
+        headers = {
+            'Authorization': self.token,
+            'Content-Type': 'application/json'
+        }
         
-        # Try different series for MCX
-        series_list = ["FUTCOM", "FUTIDX", "FUTCUR", "FUTSTK"]
-        symbols = ["GOLDM", "GOLD"]
+        payload = {'exchangeSegmentList': ['MCXFO']}
         
-        for series in series_list:
-            for symbol in symbols:
-                params = {
-                    'exchangeSegment': segment,
-                    'series': series,
-                    'symbol': symbol
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30, verify=False)
+            if response.status_code == 200:
+                data = response.json()
+                master_text = data.get('result', '')
+                lines = [l for l in master_text.split('\n') if l.strip()]
+                print(f"✓ Downloaded MCXFO master: {len(lines)} instruments")
+                return lines
+            else:
+                print(f"✗ Master download failed: {response.status_code} - {response.text[:200]}")
+                return None
+        except Exception as e:
+            print(f"✗ Master download error: {e}")
+            return None
+    
+    def parse_gold_options(self, master_lines, symbol="GOLD", expiry_filter=None):
+        """
+        Parse Gold option instruments from master data.
+        
+        Master record format (pipe-delimited):
+        Index 0:  Segment (e.g., MCXFO)
+        Index 1:  ExchangeInstrumentID (numeric)
+        Index 3:  Symbol (e.g., GOLDM)
+        Index 5:  Series (e.g., OPTFUT)
+        Index 13: Lot size
+        Index 16: Expiry date (ISO format: 2026-02-26T23:59:59)
+        Index 17: Strike price
+        Index 18: Option type code (3=CE, 4=PE)
+        Index 19: Display name (e.g., "GOLDM 26FEB2026 CE 155000")
+        
+        Args:
+            master_lines: List of pipe-delimited record strings
+            symbol: "GOLDM" or "GOLD"
+            expiry_filter: Optional date string to filter by (e.g., "2026-02-26")
+            
+        Returns:
+            Dict mapping (strike, option_type) -> instrument info
+        """
+        options = {}
+        
+        for line in master_lines:
+            if symbol not in line or 'OPTFUT' not in line:
+                continue
+            
+            parts = line.split('|')
+            if len(parts) < 20:
+                continue
+            
+            try:
+                inst_id = int(parts[1])
+                sym = parts[3]
+                series = parts[5]
+                expiry = parts[16]          # e.g., 2026-02-26T23:59:59
+                strike = int(parts[17])
+                opt_type_code = parts[18]
+                display_name = parts[19]
+                lot_size = int(parts[13]) if parts[13].isdigit() else 10
+                
+                if sym != symbol or series != 'OPTFUT':
+                    continue
+                
+                # Filter by expiry if specified
+                if expiry_filter and expiry_filter not in expiry:
+                    continue
+                
+                opt_type = 'CE' if opt_type_code == '3' else 'PE' if opt_type_code == '4' else None
+                if not opt_type:
+                    continue
+                
+                options[(strike, opt_type)] = {
+                    'instrument_id': inst_id,
+                    'display_name': display_name,
+                    'strike': strike,
+                    'option_type': opt_type,
+                    'expiry': expiry,
+                    'lot_size': lot_size,
+                    'symbol': sym
                 }
                 
-                try:
-                    response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if isinstance(data, list) and len(data) > 0:
-                            result = data[0].get('result', {})
-                            instrument_id = result.get('ExchangeInstrumentID')
-                            if instrument_id:
-                                print(f"✓ Found Gold future: {symbol} (series={series}, ID={instrument_id})")
-                                return {
-                                    'symbol': symbol,
-                                    'series': series,
-                                    'instrument_id': instrument_id
-                                }
-                except Exception as e:
-                    continue
+            except (ValueError, IndexError):
+                continue
         
-        print("✗ Could not find Gold future symbol")
-        return None
+        return options
     
-    def get_option_expiry_dates(self, symbol="GOLDM", segment=51):
-        """Get available expiry dates for Gold options"""
-        if not self.token:
-            self.login()
-        
-        url = f"{self.base_url}/instruments/instrument/expiryDate"
-        headers = {'Authorization': self.token}
-        
-        # Use known working series for MCX
-        series = "OPTFUT"
-        
-        params = {
-            'exchangeSegment': segment,
-            'series': series,
-            'symbol': symbol
-        }
-        
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
-            if response.status_code == 200:
-                data = response.json()
-                if 'result' in data and isinstance(data['result'], list):
-                    result = data['result']
-                    if result and len(result) > 0:
-                        print(f"✓ Found {len(result)} expiry dates (series={series})")
-                        return result, series
-        except Exception as e:
-            print(f"  Error: {e}")
-        
-        print("✗ Could not fetch expiry dates")
-        return None, None
-    
-    def get_option_instrument_details(self, series, symbol, expiry_date, option_type, strike_price, segment=51):
+    def parse_gold_futures(self, master_lines, symbol="GOLD"):
         """
-        Get option instrument details using GetOptionSymbol endpoint.
-        Returns full instrument details including numeric ExchangeInstrumentID.
+        Parse Gold future instruments from master data.
+        Used to find the nearest future contract for spot price reference.
         
         Args:
-            series: "OPTFUT" or similar for MCX options
+            master_lines: List of pipe-delimited record strings
             symbol: "GOLDM" or "GOLD"
-            expiry_date: "26Mar2026" format (ddMmmyyyy)
-            option_type: "CE" or "PE"
-            strike_price: Integer strike price
-            segment: 51 for MCXFO
-        
+            
         Returns:
-            Dict with instrument details or None
+            List of future instrument dicts sorted by expiry (nearest first)
         """
-        if not self.token:
-            self.login()
+        futures = []
         
-        url = f"{self.base_url}/instruments/instrument/optionSymbol"
-        headers = {'Authorization': self.token}
-        
-        params = {
-            'exchangeSegment': segment,
-            'series': series,
-            'symbol': symbol,
-            'expiryDate': expiry_date,
-            'optionType': option_type,
-            'strikePrice': strike_price
-        }
-        
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, list) and len(data) > 0:
-                    result_list = data
-                    if len(result_list) > 0 and 'result' in result_list[0]:
-                        result = result_list[0]['result']
-                        if isinstance(result, list) and len(result) > 0:
-                            instrument_data = result[0]
-                            instrument_id = instrument_data.get('ExchangeInstrumentID')
-                            if instrument_id:
-                                return instrument_data
-                        elif isinstance(result, dict):
-                            instrument_id = result.get('ExchangeInstrumentID')
-                            if instrument_id:
-                                return result
+        for line in master_lines:
+            if symbol not in line or 'FUTCOM' not in line:
+                continue
+            
+            parts = line.split('|')
+            if len(parts) < 17:
+                continue
+            
+            try:
+                inst_id = int(parts[1])
+                sym = parts[3]
+                series = parts[5]
+                name = parts[4]
+                expiry = parts[16] if len(parts) > 16 else ''
                 
-                # Check if error response
-                if data and isinstance(data, dict) and data.get('type') == 'error':
-                    error_msg = data.get('description', 'Unknown error')
-                    print(f"  API Error: {error_msg}")
-            else:
-                print(f"  HTTP {response.status_code}: {response.text[:100]}")
-        except Exception as e:
-            print(f"  Error: {e}")
+                if sym != symbol or series != 'FUTCOM':
+                    continue
+                
+                futures.append({
+                    'instrument_id': inst_id,
+                    'name': name,
+                    'expiry': expiry,
+                    'symbol': sym
+                })
+            except (ValueError, IndexError):
+                continue
         
-        return None
+        # Sort by expiry (nearest first)
+        futures.sort(key=lambda x: x.get('expiry', ''))
+        return futures
     
-    def get_option_ltp(self, instrument_id, segment=51):
+    def get_quote(self, instrument_id, segment=51):
         """
-        Fetch option LTP using numeric instrument ID via quotes endpoint.
+        Fetch real-time quote for an instrument using quotes endpoint.
         
         Args:
-            instrument_id: Numeric ExchangeInstrumentID from GetOptionSymbol
-            segment: Exchange segment
-        
+            instrument_id: Numeric ExchangeInstrumentID from master
+            segment: Exchange segment (51=MCXFO)
+            
         Returns:
-            Float LTP value or None
+            Dict with ltp, close, open, high, low, volume, bid, ask or None
         """
         if not self.token:
-            self.login()
+            return None
         
         url = f"{self.base_url}/instruments/quotes"
         headers = {
@@ -205,12 +232,10 @@ class GoldATMOptionFetcher:
         }
         
         payload = {
-            "instruments": [
-                {
-                    "exchangeSegment": segment,
-                    "exchangeInstrumentID": instrument_id
-                }
-            ],
+            "instruments": [{
+                "exchangeSegment": segment,
+                "exchangeInstrumentID": instrument_id
+            }],
             "xtsMessageCode": 1502,
             "publishFormat": "JSON"
         }
@@ -220,253 +245,309 @@ class GoldATMOptionFetcher:
             if response.status_code == 200:
                 data = response.json()
                 
-                # Check listQuotes format
                 if 'result' in data and 'listQuotes' in data['result']:
                     quotes = data['result']['listQuotes']
                     if quotes and len(quotes) > 0:
                         quote = quotes[0]
-                        if isinstance(quote, dict) and 'Touchline' in quote:
-                            ltp = quote['Touchline'].get('LastTradedPrice')
-                            if ltp:
-                                return float(ltp)
-                
-                print(f"  Empty quote data: {data}")
+                        if isinstance(quote, str):
+                            quote = json.loads(quote)
+                        
+                        touchline = quote.get('Touchline', {})
+                        bid_info = touchline.get('BidInfo', {})
+                        ask_info = touchline.get('AskInfo', {})
+                        
+                        return {
+                            'ltp': touchline.get('LastTradedPrice', 0),
+                            'close': touchline.get('Close', 0),
+                            'open': touchline.get('Open', 0),
+                            'high': touchline.get('High', 0),
+                            'low': touchline.get('Low', 0),
+                            'volume': touchline.get('TotalTradedQuantity', 0),
+                            'bid': bid_info.get('Price', 0) if isinstance(bid_info, dict) else 0,
+                            'ask': ask_info.get('Price', 0) if isinstance(ask_info, dict) else 0,
+                        }
+            
+            return None
         except Exception as e:
-            print(f"  Error fetching LTP: {e}")
+            print(f"  Error fetching quote: {e}")
+            return None
+    
+    def get_gold_spot_price(self, master_lines, symbol="GOLD"):
+        """
+        Get Gold spot/future price from nearest future contract.
         
+        Args:
+            master_lines: Master data lines
+            symbol: "GOLDM" or "GOLD"
+            
+        Returns:
+            Float price or None
+        """
+        futures = self.parse_gold_futures(master_lines, symbol)
+        
+        if not futures:
+            print("  ✗ No Gold futures found in master data")
+            return None
+        
+        # Try nearest futures first (up to 3)
+        for future in futures[:3]:
+            quote = self.get_quote(future['instrument_id'])
+            if quote:
+                ltp = quote['ltp']
+                close = quote['close']
+                price = ltp if ltp > 0 else close
+                if price > 0:
+                    print(f"  ✓ {future['name']}: LTP=₹{ltp:,.1f}, Close=₹{close:,.1f}")
+                    return price
+        
+        print("  ✗ Could not get Gold spot price (market may be closed)")
         return None
+    
+    def get_nearest_expiry(self, options):
+        """
+        Get nearest expiry date from parsed options data.
+        
+        Args:
+            options: Dict from parse_gold_options()
+            
+        Returns:
+            Nearest expiry string or None
+        """
+        expiries = set()
+        for key, opt in options.items():
+            expiries.add(opt['expiry'])
+        
+        expiries = sorted(expiries)
+        return expiries[0] if expiries else None
     
     def estimate_option_price(self, spot_price, strike_price, option_type):
         """
-        Estimate option price when real-time data unavailable.
+        Estimate option premium when no live data available.
         Uses simple 2.5% ATM premium with distance-based decay.
+        
+        Args:
+            spot_price: Current spot/future price
+            strike_price: Option strike price
+            option_type: 'CE' or 'PE'
+            
+        Returns:
+            Estimated premium (float)
         """
         distance = abs(strike_price - spot_price)
-        atm_premium = spot_price * 0.025  # 2.5% of spot as base ATM premium
+        atm_premium = spot_price * 0.025  # ~2.5% of spot as ATM estimate
         
-        # Decay based on distance from ATM
-        if distance == 0:
-            premium = atm_premium
-        else:
-            decay_factor = 1 - (distance / spot_price) * 2
-            decay_factor = max(decay_factor, 0.1)  # Minimum 10% of ATM premium
-            premium = atm_premium * decay_factor
+        if distance < 1000:
+            return round(atm_premium, 1)
         
-        return round(premium, 2)
+        decay = max(0.1, 1 - (distance / spot_price) * 2)
+        return round(atm_premium * decay, 1)
     
-    def fetch_atm_options(self):
-        """Main function to fetch Gold ATM option prices"""
-        print("\n" + "="*70)
-        print("GOLD ATM OPTION FETCHER (Using GetOptionSymbol API)")
-        print("="*70 + "\n")
+    def fetch_atm_options(self, symbol="GOLD"):
+        """
+        Main function to fetch Gold ATM option prices.
         
+        Flow:
+        1. Login to XTS API
+        2. Download MCXFO instrument master (POST endpoint)
+        3. Get spot price from nearest GOLDM future
+        4. Parse options from master, find ATM strike
+        5. Fetch real-time quotes using numeric instrument IDs
+        
+        Args:
+            symbol: "GOLDM" (lot=10) or "GOLD" (lot=100)
+            
+        Returns:
+            Dict with ATM option data or None
+        """
+        print("\n" + "=" * 70)
+        print("GOLD ATM OPTION FETCHER (Using Instrument Master)")
+        print("=" * 70 + "\n")
+        
+        # Step 1: Login
         if not self.login():
             return None
         
-        # Step 1: Get Gold future details
-        print("[1/5] Finding Gold future contract...")
-        gold_future = self.get_gold_future_symbol()
-        if not gold_future:
-            print("  ⚠ Using default: GOLDM")
-            gold_symbol = "GOLDM"
-            series = "OPTFUT"
-        else:
-            gold_symbol = gold_future['symbol']
-            series = "OPTFUT"  # Options series
-        
-        # Step 2: Get expiry dates
-        print(f"\n[2/5] Getting expiry dates for {gold_symbol}...")
-        expiry_dates, expiry_series = self.get_option_expiry_dates(gold_symbol)
-        if not expiry_dates:
-            print("  ✗ Could not get expiry dates")
+        # Step 2: Download instrument master
+        print("\n[1/4] Downloading MCXFO instrument master...")
+        master_lines = self.download_mcxfo_master()
+        if not master_lines:
             return None
         
-        nearest_expiry = expiry_dates[0]
-        expiry_obj = datetime.fromisoformat(nearest_expiry.replace('T23:59:59', ''))
-        expiry_formatted = expiry_obj.strftime('%d%b%Y')  # "26Mar2026"
-        print(f"  Nearest expiry: {expiry_formatted}")
+        # Step 3: Get Gold spot/future price
+        print(f"\n[2/4] Getting {symbol} spot price from futures...")
+        spot_price = self.get_gold_spot_price(master_lines, symbol)
         
-        # Step 3: Calculate ATM strike (using estimated spot price)
-        spot_price = 75000.0  # Estimated Gold spot (Rs. 75,000)
-        atm_strike = round(spot_price / 100) * 100
-        print(f"\n[3/5] Gold Spot Price: Rs.{spot_price:,.2f} (estimated)")
-        print(f"  ATM Strike: Rs.{atm_strike:,.0f}")
+        if not spot_price:
+            # Reasonable default based on current market levels
+            spot_price = 157000
+            print(f"  ⚠ Using estimated spot price: ₹{spot_price:,.0f}")
         
-        # Step 4: Get option instrument details using GetOptionSymbol
-        print(f"\n[4/5] Fetching option instrument IDs from GetOptionSymbol API...")
+        # Step 4: Parse options and find ATM
+        print(f"\n[3/4] Parsing {symbol} options from master...")
+        all_options = self.parse_gold_options(master_lines, symbol)
+        print(f"  Found {len(all_options)} option contracts total")
         
-        call_details = self.get_option_instrument_details(
-            series=expiry_series,
-            symbol=gold_symbol,
-            expiry_date=expiry_formatted,
-            option_type="CE",
-            strike_price=int(atm_strike),
-            segment=51
-        )
-        
-        put_details = self.get_option_instrument_details(
-            series=expiry_series,
-            symbol=gold_symbol,
-            expiry_date=expiry_formatted,
-            option_type="PE",
-            strike_price=int(atm_strike),
-            segment=51
-        )
-        
-        if not call_details or not put_details:
-            print("  ✗ Could not get option instrument details")
-            print("\n" + "="*70)
-            print("ISSUE: MCX Options Data Not Available")
-            print("="*70)
-            print("""
-The GetOptionSymbol API endpoint works (verified with NIFTY options),
-but returns "Data not available" for Gold/MCX options.
-
-REASONS:
-1. Your account doesn't have MCX OPTIONS data access
-   (Note: You have MCX FUTURES access since GetExpiryDate works)
-
-2. XTS API may not support MCX options via GetOptionSymbol
-   (API may only work for NSE/NFO equity options)
-
-SOLUTIONS:
-1. Contact your XTS broker and ask:
-   - "Is MCX options data enabled on my account?"
-   - "Does GetOptionSymbol API support MCX options?"
-   - Request access to MCX options data
-
-2. Try during MCX market hours: 10:00 AM - 11:30 PM IST
-
-3. Use WebSocket streaming for real-time MCX data
-
-4. Use estimation (run with use_estimation=True)
-
-For now, use NIFTY option fetcher which works perfectly:
-  python fetch_atm_option_ltp.py
-""")
-            
-            # Provide estimation anyway
-            if True:  # Always estimate as fallback
-                print("\n" + "="*70)
-                print("ESTIMATED VALUES (Fallback)")
-                print("="*70)
-                
-                call_ltp = self.estimate_option_price(spot_price, atm_strike, 'CE')
-                put_ltp = self.estimate_option_price(spot_price, atm_strike, 'PE')
-                
-                print(f"Call Option LTP: Rs.{call_ltp:,.2f} (estimated)")
-                print(f"Put Option LTP:  Rs.{put_ltp:,.2f} (estimated)")
-                
-                result = {
-                    'timestamp': datetime.now().isoformat(),
-                    'spot_price': spot_price,
-                    'atm_strike': atm_strike,
-                    'expiry': expiry_formatted,
-                    'call': {
-                        'symbol': f"{gold_symbol} {expiry_formatted} {int(atm_strike)} CE",
-                        'ltp': call_ltp,
-                        'estimated': True
-                    },
-                    'put': {
-                        'symbol': f"{gold_symbol} {expiry_formatted} {int(atm_strike)} PE",
-                        'ltp': put_ltp,
-                        'estimated': True
-                    },
-                    'note': 'Estimated values - MCX options data not available via API'
-                }
-                
-                output_file = "gold_atm_options_result.json"
-                with open(output_file, 'w') as f:
-                    json.dump(result, f, indent=2)
-                
-                print(f"\n✓ Estimated results saved to {output_file}")
-                print("="*70 + "\n")
-                
-                return result
-            
+        if len(all_options) == 0:
+            print(f"  ✗ No {symbol} options found in master data")
             return None
         
-        call_id = call_details.get('ExchangeInstrumentID')
-        put_id = put_details.get('ExchangeInstrumentID')
+        # Get nearest expiry
+        nearest_expiry = self.get_nearest_expiry(all_options)
+        if not nearest_expiry:
+            print("  ✗ No expiry dates found")
+            return None
         
-        print(f"  ✓ Call Option ID: {call_id}")
-        print(f"    Display Name: {call_details.get('DisplayName')}")
-        print(f"  ✓ Put Option ID: {put_id}")
-        print(f"    Display Name: {put_details.get('DisplayName')}")
+        expiry_date = nearest_expiry.split('T')[0]  # e.g., 2026-02-26
+        print(f"  Nearest expiry: {expiry_date}")
         
-        # Step 5: Fetch LTPs using numeric instrument IDs
-        print(f"\n[5/5] Fetching option prices...")
+        # Filter for nearest expiry only
+        options = self.parse_gold_options(master_lines, symbol, expiry_filter=expiry_date)
+        print(f"  Options for {expiry_date}: {len(options)}")
         
-        call_ltp = self.get_option_ltp(call_id, segment=51)
-        put_ltp = self.get_option_ltp(put_id, segment=51)
+        # Calculate ATM strike (GOLD strikes are in 1000 increments)
+        strike_step = 1000 if symbol == "GOLD" else 100
+        atm_strike = round(spot_price / strike_step) * strike_step
+        print(f"  ATM Strike: {atm_strike} (Spot: ₹{spot_price:,.1f})")
         
-        # Results
-        print("\n" + "="*70)
+        # Find the exact ATM strikes (may need to find nearest available)
+        ce_key = (atm_strike, 'CE')
+        pe_key = (atm_strike, 'PE')
+        
+        if ce_key not in options:
+            available_ce = sorted([k[0] for k in options if k[1] == 'CE'])
+            if available_ce:
+                nearest_ce = min(available_ce, key=lambda x: abs(x - atm_strike))
+                ce_key = (nearest_ce, 'CE')
+                print(f"  Nearest CE strike: {nearest_ce}")
+            else:
+                print("  ✗ No CE options available")
+                return None
+        
+        if pe_key not in options:
+            available_pe = sorted([k[0] for k in options if k[1] == 'PE'])
+            if available_pe:
+                nearest_pe = min(available_pe, key=lambda x: abs(x - atm_strike))
+                pe_key = (nearest_pe, 'PE')
+                print(f"  Nearest PE strike: {nearest_pe}")
+            else:
+                print("  ✗ No PE options available")
+                return None
+        
+        call_info = options[ce_key]
+        put_info = options[pe_key]
+        
+        # Step 5: Fetch real-time prices
+        print(f"\n[4/4] Fetching option prices...")
+        print(f"  CE: {call_info['display_name']} (ID={call_info['instrument_id']})")
+        print(f"  PE: {put_info['display_name']} (ID={put_info['instrument_id']})")
+        
+        call_quote = self.get_quote(call_info['instrument_id'])
+        put_quote = self.get_quote(put_info['instrument_id'])
+        
+        # Process results
+        print("\n" + "=" * 70)
         print("RESULTS")
-        print("="*70)
+        print("=" * 70)
         
-        call_estimated = False
-        put_estimated = False
+        call_ltp = 0
+        put_ltp = 0
+        call_estimated = True
+        put_estimated = True
         
-        if call_ltp:
-            print(f"Call Option LTP: Rs.{call_ltp:,.2f} ✓ LIVE DATA")
+        if call_quote and call_quote['ltp'] > 0:
+            call_ltp = call_quote['ltp']
+            call_estimated = False
+            print(f"  Call ({call_info['display_name']}): ₹{call_ltp:,.1f}  ✓ LIVE")
+        elif call_quote and call_quote['close'] > 0:
+            call_ltp = call_quote['close']
+            call_estimated = False
+            print(f"  Call ({call_info['display_name']}): ₹{call_ltp:,.1f}  (Last Close)")
         else:
-            call_ltp = self.estimate_option_price(spot_price, atm_strike, 'CE')
-            call_estimated = True
-            print(f"Call Option LTP: Rs.{call_ltp:,.2f} (estimated - no live data)")
+            call_ltp = self.estimate_option_price(spot_price, ce_key[0], 'CE')
+            print(f"  Call ({call_info['display_name']}): ₹{call_ltp:,.1f}  (Estimated)")
         
-        if put_ltp:
-            print(f"Put Option LTP:  Rs.{put_ltp:,.2f} ✓ LIVE DATA")
+        if put_quote and put_quote['ltp'] > 0:
+            put_ltp = put_quote['ltp']
+            put_estimated = False
+            print(f"  Put  ({put_info['display_name']}): ₹{put_ltp:,.1f}  ✓ LIVE")
+        elif put_quote and put_quote['close'] > 0:
+            put_ltp = put_quote['close']
+            put_estimated = False
+            print(f"  Put  ({put_info['display_name']}): ₹{put_ltp:,.1f}  (Last Close)")
         else:
-            put_ltp = self.estimate_option_price(spot_price, atm_strike, 'PE')
-            put_estimated = True
-            print(f"Put Option LTP:  Rs.{put_ltp:,.2f} (estimated - no live data)")
+            put_ltp = self.estimate_option_price(spot_price, pe_key[0], 'PE')
+            print(f"  Put  ({put_info['display_name']}): ₹{put_ltp:,.1f}  (Estimated)")
         
+        lot_size = call_info.get('lot_size', 100)
+        print(f"\n  Lot Size:     {lot_size}")
+        print(f"  CE Cost:      ₹{call_ltp * lot_size:,.2f} ({lot_size} × ₹{call_ltp:,.1f})")
+        print(f"  PE Cost:      ₹{put_ltp * lot_size:,.2f} ({lot_size} × ₹{put_ltp:,.1f})")
+        print(f"  Straddle:     ₹{(call_ltp + put_ltp) * lot_size:,.2f}")
+        
+        # Show nearby strikes (chain view)
+        print(f"\n--- Option Chain (Nearby Strikes) ---")
+        nearby_strikes = sorted(set(
+            range(atm_strike - 5000, atm_strike + 6000, 1000)
+        ))
+        for strike in nearby_strikes:
+            ce_k = (strike, 'CE')
+            pe_k = (strike, 'PE')
+            if ce_k in options and pe_k in options:
+                ce_q = self.get_quote(options[ce_k]['instrument_id'])
+                pe_q = self.get_quote(options[pe_k]['instrument_id'])
+                
+                ce_p = ce_q['ltp'] if ce_q and ce_q['ltp'] > 0 else (ce_q['close'] if ce_q else 0)
+                pe_p = pe_q['ltp'] if pe_q and pe_q['ltp'] > 0 else (pe_q['close'] if pe_q else 0)
+                
+                atm_marker = " <-- ATM" if strike == atm_strike else ""
+                print(f"  {strike}: CE=₹{ce_p:>8,.1f}  PE=₹{pe_p:>8,.1f}{atm_marker}")
+        
+        # Build result
         result = {
             'timestamp': datetime.now().isoformat(),
+            'symbol': symbol,
             'spot_price': spot_price,
             'atm_strike': atm_strike,
-            'expiry': expiry_formatted,
+            'expiry': expiry_date,
+            'lot_size': lot_size,
             'call': {
-                'instrument_id': call_id,
-                'display_name': call_details.get('DisplayName'),
-                'strike_price': call_details.get('StrikePrice'),
+                'instrument_id': call_info['instrument_id'],
+                'display_name': call_info['display_name'],
+                'strike': ce_key[0],
                 'ltp': call_ltp,
                 'estimated': call_estimated,
-                'lot_size': call_details.get('LotSize'),
-                'tick_size': call_details.get('TickSize')
+                'quote': call_quote
             },
             'put': {
-                'instrument_id': put_id,
-                'display_name': put_details.get('DisplayName'),
-                'strike_price': put_details.get('StrikePrice'),
+                'instrument_id': put_info['instrument_id'],
+                'display_name': put_info['display_name'],
+                'strike': pe_key[0],
                 'ltp': put_ltp,
                 'estimated': put_estimated,
-                'lot_size': put_details.get('LotSize'),
-                'tick_size': put_details.get('TickSize')
+                'quote': put_quote
             }
         }
         
         # Save to JSON
         output_file = "gold_atm_options_result.json"
         with open(output_file, 'w') as f:
-            json.dump(result, f, indent=2)
+            json.dump(result, f, indent=2, default=str)
         
         print(f"\n✓ Results saved to {output_file}")
-        print("="*70 + "\n")
+        print("=" * 70 + "\n")
         
         return result
 
 
 if __name__ == "__main__":
     fetcher = GoldATMOptionFetcher()
-    result = fetcher.fetch_atm_options()
+    result = fetcher.fetch_atm_options("GOLD")
     
     if result:
         print("Success! Check gold_atm_options_result.json for details.")
     else:
         print("\nFailed to fetch Gold ATM options.")
         print("Please verify:")
-        print("1. Market is open (MCX: 10 AM - 11:30 PM IST)")
-        print("2. Your account has MCX options data access")
-        print("3. XTS API credentials are correct")
+        print("1. Market hours — MCX: 9:00 AM - 11:30 PM IST")
+        print("2. XTS API credentials are correct")
+        print("3. Account has MCXFO data access")

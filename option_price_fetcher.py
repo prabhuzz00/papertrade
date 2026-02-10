@@ -436,6 +436,46 @@ class OptionPriceFetcher:
             'delta': round(delta, 2),
             'premium': price
         }
+    
+    def get_atm_strike(self, spot_price: float) -> int:
+        """Calculate ATM strike (rounded to nearest 50)"""
+        return round(spot_price / 50) * 50
+    
+    def get_option_data(self, signal_type: str, spot_price: float, atr: float = 50) -> dict:
+        """
+        Get complete option data for trading
+        
+        Args:
+            signal_type: 'CALL' or 'PUT'
+            spot_price: Current NIFTY spot price
+            atr: Average True Range for volatility
+        
+        Returns:
+            dict with strike, option_type, premium, stop_loss, target
+        """
+        # Calculate ATM strike
+        atm_strike = self.get_atm_strike(spot_price)
+        
+        # Determine option type (CE for CALL signal, PE for PUT signal)
+        option_type = 'CE' if signal_type == 'CALL' else 'PE'
+        
+        # Fetch option premium
+        premium = self.get_option_ltp(atm_strike, option_type, spot_price, atr)
+        
+        # Calculate stop loss and target for options (based on premium)
+        # SL: 30% loss from entry premium
+        # Target: 50% profit from entry premium
+        stop_loss = premium * 0.70  # 30% loss
+        target = premium * 1.50     # 50% profit
+        
+        return {
+            'strike': atm_strike,
+            'option_type': option_type,
+            'premium': premium,
+            'stop_loss': stop_loss,
+            'target': target,
+            'spot_price': spot_price
+        }
 
 
 # Example usage

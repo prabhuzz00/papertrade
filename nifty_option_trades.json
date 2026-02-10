@@ -1,0 +1,12 @@
+{
+  "initial_capital": 100000,
+  "current_capital": 100000,
+  "open_positions": [],
+  "closed_trades": [],
+  "trade_counter": 0,
+  "settings": {
+    "lot_size": 65,
+    "risk_reward_ratio": 2,
+    "risk_percent": 2
+  }
+}

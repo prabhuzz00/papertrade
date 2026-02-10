@@ -1,17 +1,42 @@
 {
-  "timestamp": "2026-02-09T17:44:24.582263",
-  "spot_price": 75000.0,
-  "atm_strike": 75000,
-  "expiry": "26Mar2026",
+  "timestamp": "2026-02-10T18:58:54.955798",
+  "symbol": "GOLD",
+  "spot_price": 157647,
+  "atm_strike": 158000,
+  "expiry": "2026-02-27",
+  "lot_size": 100,
   "call": {
-    "symbol": "GOLDM 26Mar2026 75000 CE",
-    "ltp": 1875.0,
-    "estimated": true
+    "instrument_id": 525667,
+    "display_name": "GOLD 27FEB2026 CE 158000",
+    "strike": 158000,
+    "ltp": 9889,
+    "estimated": false,
+    "quote": {
+      "ltp": 0,
+      "close": 9889,
+      "open": 0,
+      "high": 0,
+      "low": 0,
+      "volume": 0,
+      "bid": 4276.5,
+      "ask": 8069
+    }
   },
   "put": {
-    "symbol": "GOLDM 26Mar2026 75000 PE",
-    "ltp": 1875.0,
-    "estimated": true
-  },
-  "note": "Estimated values - MCX options data not available via API"
+    "instrument_id": 526355,
+    "display_name": "GOLD 27FEB2026 PE 158000",
+    "strike": 158000,
+    "ltp": 9823,
+    "estimated": false,
+    "quote": {
+      "ltp": 0,
+      "close": 9823,
+      "open": 0,
+      "high": 0,
+      "low": 0,
+      "volume": 0,
+      "bid": 0,
+      "ask": 0
+    }
+  }
 }

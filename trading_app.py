@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QComboBox, 
                              QTableWidget, QTableWidgetItem, QTabWidget,
                              QTextEdit, QGroupBox, QGridLayout, QMessageBox,
-                             QSplitter, QHeaderView)
+                             QSplitter, QHeaderView, QDialog, QCheckBox, QDialogButtonBox)
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QColor
 import pyqtgraph as pg
@@ -39,9 +39,11 @@ from strategy_wrappers import (BollingerMACDStrategy,
                                OpeningRangeBreakoutStrategy, 
                                SidewaysStrategy,
                                MomentumBreakoutStrategy,
-                               MeanReversionStrategy)
+                               MeanReversionStrategy,
+                               EMACrossoverStrategy)
 from paper_trading_engine import PaperTradingEngine, Trade
 from option_price_fetcher import OptionPriceFetcher
+from fetch_gold_atm_options import GoldATMOptionFetcher
 
 
 class LiveDataThread(QThread):
@@ -91,6 +93,84 @@ class LiveDataThread(QThread):
         """Stop the thread"""
         self._stop_requested = True
         self.running = False
+
+
+class StrategySelectionDialog(QDialog):
+    """Dialog for selecting strategies to use in auto trading"""
+    
+    def __init__(self, strategies, selected_strategies=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Auto Trading Strategies")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        
+        # Store strategy list
+        self.strategies = strategies
+        self.checkboxes = {}
+        
+        # Setup UI
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Title label
+        title_label = QLabel("<h3>Select Strategies for Auto Trading</h3>")
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Info label
+        info_label = QLabel("Only checked strategies will be used for automatic trading:")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        layout.addSpacing(10)
+        
+        # Create checkbox for each strategy
+        for strategy_name in strategies:
+            checkbox = QCheckBox(strategy_name)
+            # Check by default if in selected_strategies, or all if none selected
+            if selected_strategies is None:
+                checkbox.setChecked(True)
+            else:
+                checkbox.setChecked(strategy_name in selected_strategies)
+            self.checkboxes[strategy_name] = checkbox
+            layout.addWidget(checkbox)
+        
+        layout.addSpacing(10)
+        
+        # Select/Deselect all buttons
+        button_layout = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(self.select_all)
+        deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.clicked.connect(self.deselect_all)
+        button_layout.addWidget(select_all_btn)
+        button_layout.addWidget(deselect_all_btn)
+        layout.addLayout(button_layout)
+        
+        layout.addSpacing(10)
+        
+        # Dialog buttons (OK/Cancel)
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+    
+    def select_all(self):
+        """Select all strategy checkboxes"""
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(True)
+    
+    def deselect_all(self):
+        """Deselect all strategy checkboxes"""
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(False)
+    
+    def get_selected_strategies(self):
+        """Return list of selected strategy names"""
+        return [name for name, checkbox in self.checkboxes.items() 
+                if checkbox.isChecked()]
 
 
 class CandlestickChart(QWidget):
@@ -172,6 +252,16 @@ class CandlestickChart(QWidget):
             self.plot_widget.plot(times, bb_middle.values, 
                                 pen=pg.mkPen((255, 165, 0), width=2))  # Orange
         
+        # Add EMA lines if available
+        if 'EMA_9' in df_display.columns and not df_display['EMA_9'].isna().all():
+            ema9 = df_display['EMA_9'].ffill().bfill()
+            ema21 = df_display['EMA_21'].ffill().bfill()
+            
+            self.plot_widget.plot(times, ema9.values, 
+                                pen=pg.mkPen((0, 255, 0), width=2))  # Green for 9 EMA
+            self.plot_widget.plot(times, ema21.values, 
+                                pen=pg.mkPen((255, 0, 0), width=2))  # Red for 21 EMA
+        
         # Set axis range manually
         if len(df_display) > 0:
             price_min = df_display['Low'].min().item()
@@ -188,14 +278,14 @@ class TradingMainWindow(QMainWindow):
     
     # Instrument configurations
     INSTRUMENTS = {
-        'NIFTY 50': {'symbol': '^NSEI', 'name': 'NIFTY 50', 'xts_enabled': True, 'interval': '5m'},
-        'CRUDE OIL': {'symbol': 'CL=F', 'name': 'Crude Oil', 'xts_enabled': False, 'interval': '1m'},
-        'GOLD': {'symbol': 'GC=F', 'name': 'Gold', 'xts_enabled': False, 'interval': '1m'}
+        'NIFTY 50': {'symbol': '^NSEI', 'name': 'NIFTY 50', 'xts_enabled': True, 'interval': '5m', 'lot_size': 75},
+        'CRUDE OIL': {'symbol': 'CL=F', 'name': 'Crude Oil', 'xts_enabled': False, 'interval': '1m', 'lot_size': 1},
+        'GOLD': {'symbol': 'GC=F', 'name': 'Gold', 'xts_enabled': True, 'interval': '1m', 'lot_size': 100}
     }
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NIFTY 50 Live Trading System")
+        self.setWindowTitle("NIFTY 50 Options Live Trading System")
         self.setGeometry(100, 100, 1400, 900)
         
         # Current instrument
@@ -207,7 +297,8 @@ class TradingMainWindow(QMainWindow):
             'Opening Range Breakout': OpeningRangeBreakoutStrategy(),
             'Sideways Market': SidewaysStrategy(),
             'Momentum Breakout': MomentumBreakoutStrategy(),
-            'Mean Reversion': MeanReversionStrategy()
+            'Mean Reversion': MeanReversionStrategy(),
+            'EMA Crossover': EMACrossoverStrategy()
         }
         
         self.current_strategy = 'Bollinger + MACD'
@@ -224,8 +315,20 @@ class TradingMainWindow(QMainWindow):
         self.current_data = None
         self.current_price = 0
         
+        # Store selected strategies for auto trading
+        self.selected_auto_trade_strategies = list(self.strategies.keys())  # All selected by default
+        
         # Initialize option price fetcher
         self.option_fetcher = OptionPriceFetcher(use_xts=True)
+        
+        # Initialize Gold option fetcher (MCX via instrument master)
+        self.gold_option_fetcher = None
+        self.gold_master_lines = None
+        self.gold_options_cache = {}
+        self.gold_spot_price = 0
+        self.gold_future_id = None
+        self.gold_expiry = None
+        self.init_gold_options()
         
         # Setup UI
         self.setup_ui()
@@ -253,6 +356,19 @@ class TradingMainWindow(QMainWindow):
         # Load initial data immediately
         self.load_initial_data()
         
+        # Print startup capital info
+        print("\n" + "="*70)
+        print("   LIVE OPTIONS TRADING SYSTEM")
+        print("="*70)
+        print(f"Starting Capital: ₹{1000000:,} (10 Lakhs)")
+        print(f"Trading Mode: Paper Trading (Options)")
+        print(f"NIFTY Lot Size: 75 | GOLD Lot Size: 100")
+        if self.gold_spot_price > 0:
+            print(f"MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
+        if self.gold_expiry:
+            print(f"Gold Options Expiry: {self.gold_expiry}")
+        print("="*70 + "\n")
+        
     def load_initial_data(self):
         """Load initial market data on startup"""
         try:
@@ -270,6 +386,133 @@ class TradingMainWindow(QMainWindow):
                 print("No data available. Market might be closed.")
         except Exception as e:
             print(f"Error loading initial data: {e}")
+    
+    def init_gold_options(self):
+        """Initialize Gold option data from XTS instrument master"""
+        try:
+            self.gold_option_fetcher = GoldATMOptionFetcher()
+            if not self.gold_option_fetcher.login():
+                print("[WARNING] Gold option fetcher login failed")
+                return False
+            
+            print("[INFO] Downloading MCXFO instrument master for Gold options...")
+            self.gold_master_lines = self.gold_option_fetcher.download_mcxfo_master()
+            if not self.gold_master_lines:
+                print("[WARNING] Failed to download MCXFO master")
+                return False
+            
+            # Get nearest GOLD future instrument ID for spot price
+            futures = self.gold_option_fetcher.parse_gold_futures(self.gold_master_lines, "GOLD")
+            if futures:
+                self.gold_future_id = futures[0]['instrument_id']
+                # Try to get initial spot price
+                quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
+                if quote:
+                    spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                    if spot > 0:
+                        self.gold_spot_price = spot
+                        print(f"[INFO] MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
+            
+            # Parse all GOLD options
+            all_options = self.gold_option_fetcher.parse_gold_options(self.gold_master_lines, "GOLD")
+            nearest_expiry = self.gold_option_fetcher.get_nearest_expiry(all_options)
+            
+            if nearest_expiry:
+                self.gold_expiry = nearest_expiry.split('T')[0]
+                self.gold_options_cache = self.gold_option_fetcher.parse_gold_options(
+                    self.gold_master_lines, "GOLD", expiry_filter=self.gold_expiry
+                )
+                print(f"[INFO] Gold options loaded: {len(self.gold_options_cache)} contracts, expiry={self.gold_expiry}")
+            
+            return True
+        except Exception as e:
+            print(f"[WARNING] Gold options init error: {e}")
+            return False
+    
+    def get_gold_option_data(self, signal_type, spot_price, atr=500):
+        """
+        Get Gold option data for trading (similar to OptionPriceFetcher.get_option_data)
+        
+        Args:
+            signal_type: 'CALL' or 'PUT'
+            spot_price: MCX Gold spot price (INR)
+            atr: Average True Range
+        
+        Returns:
+            dict with strike, option_type, premium, stop_loss, target, spot_price
+        """
+        if not self.gold_options_cache or not self.gold_option_fetcher:
+            return None
+        
+        # ATM strike rounded to nearest 1000 (GOLD strike step)
+        atm_strike = round(spot_price / 1000) * 1000
+        option_type = 'CE' if signal_type == 'CALL' else 'PE'
+        
+        key = (atm_strike, option_type)
+        if key not in self.gold_options_cache:
+            available = sorted([k[0] for k in self.gold_options_cache if k[1] == option_type])
+            if available:
+                nearest = min(available, key=lambda x: abs(x - atm_strike))
+                key = (nearest, option_type)
+            else:
+                return None
+        
+        option_info = self.gold_options_cache[key]
+        
+        # Fetch live premium
+        quote = self.gold_option_fetcher.get_quote(option_info['instrument_id'])
+        premium = 0
+        if quote:
+            premium = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+        
+        if premium <= 0:
+            premium = self.gold_option_fetcher.estimate_option_price(spot_price, key[0], option_type)
+        
+        # SL: 30% loss, Target: 50% profit (same as NIFTY)
+        stop_loss = premium * 0.70
+        target = premium * 1.50
+        
+        return {
+            'strike': key[0],
+            'option_type': option_type,
+            'premium': premium,
+            'stop_loss': stop_loss,
+            'target': target,
+            'spot_price': spot_price,
+            'instrument_id': option_info['instrument_id'],
+            'display_name': option_info.get('display_name', '')
+        }
+    
+    def get_gold_option_ltp(self, strike, option_type, spot_price, atr=500):
+        """
+        Get current Gold option LTP for a specific strike
+        
+        Args:
+            strike: Option strike price
+            option_type: 'CE' or 'PE'
+            spot_price: MCX Gold spot price
+        
+        Returns:
+            Float premium value
+        """
+        if not self.gold_options_cache or not self.gold_option_fetcher:
+            if self.gold_option_fetcher:
+                return self.gold_option_fetcher.estimate_option_price(spot_price, strike, option_type)
+            return 0
+        
+        key = (strike, option_type)
+        if key not in self.gold_options_cache:
+            return self.gold_option_fetcher.estimate_option_price(spot_price, strike, option_type)
+        
+        option_info = self.gold_options_cache[key]
+        quote = self.gold_option_fetcher.get_quote(option_info['instrument_id'])
+        
+        if quote:
+            ltp = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+            if ltp > 0:
+                return ltp
+        
+        return self.gold_option_fetcher.estimate_option_price(spot_price, strike, option_type)
         
     def setup_ui(self):
         """Setup the user interface"""
@@ -332,6 +575,15 @@ class TradingMainWindow(QMainWindow):
         self.price_label.setFont(QFont('Arial', 14, QFont.Bold))
         layout.addWidget(self.price_label)
         
+        # Option trading indicator
+        self.option_indicator = QLabel("📊 Options")
+        self.option_indicator.setStyleSheet("color: #0066cc; font-weight: bold; padding: 5px;")
+        self.option_indicator.setToolTip("Trading Options with real-time premiums via XTS")
+        layout.addWidget(self.option_indicator)
+        # Hide initially, show only for options-enabled instruments
+        if self.current_instrument not in ['NIFTY 50', 'GOLD']:
+            self.option_indicator.hide()
+        
         layout.addStretch()
         
         # Auto-trade toggle
@@ -344,6 +596,12 @@ class TradingMainWindow(QMainWindow):
         save_btn = QPushButton("Save All Trades")
         save_btn.clicked.connect(self.save_all_trades)
         layout.addWidget(save_btn)
+        
+        # Reset button
+        reset_btn = QPushButton("Reset All")
+        reset_btn.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: bold;")
+        reset_btn.clicked.connect(self.reset_all_data)
+        layout.addWidget(reset_btn)
         
         group.setLayout(layout)
         return group
@@ -443,9 +701,9 @@ class TradingMainWindow(QMainWindow):
         
         for strategy_name in self.strategies.keys():
             table = QTableWidget()
-            table.setColumnCount(10)
+            table.setColumnCount(11)
             table.setHorizontalHeaderLabels([
-                'Time', 'Signal', 'Entry', 'Exit', 'SL', 'Target', 
+                'Time', 'Signal', 'Strike/Type', 'Premium (Entry)', 'Current', 'SL', 'Target', 
                 'P&L', 'Status', 'Duration', 'Notes'
             ])
             table.horizontalHeader().setStretchLastSection(True)
@@ -496,12 +754,27 @@ class TradingMainWindow(QMainWindow):
         self.data_thread.start()
         
         # Update window title
-        self.setWindowTitle(f"{instrument_config['name']} Live Trading System")
+        title_suffix = " Options Trading" if instrument_name in ['NIFTY 50', 'GOLD'] else " Live Trading"
+        self.setWindowTitle(f"{instrument_config['name']}{title_suffix} System")
+        
+        # Show/hide option indicator
+        if instrument_name in ['NIFTY 50', 'GOLD']:
+            self.option_indicator.show()
+        else:
+            self.option_indicator.hide()
         
         # Load initial data
         self.load_initial_data()
         
         print(f"[INFO] Switched to {instrument_config['name']}")
+        if instrument_name == 'NIFTY 50':
+            print(f"[INFO] Trading NIFTY Options with real-time premiums")
+        elif instrument_name == 'GOLD':
+            print(f"[INFO] Trading MCX GOLD Options with real-time premiums")
+            if self.gold_spot_price > 0:
+                print(f"[INFO] MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
+            if self.gold_expiry:
+                print(f"[INFO] Gold Options Expiry: {self.gold_expiry}")
         
     def on_strategy_changed(self, strategy_name):
         """Handle strategy selection change"""
@@ -549,6 +822,9 @@ class TradingMainWindow(QMainWindow):
         if self.current_data is None or self.current_data.empty:
             return
         
+        # Calculate ATR for option pricing volatility
+        atr = self.calculate_atr()
+        
         # Check all strategies, not just the current one
         for strategy_name, strategy in self.strategies.items():
             signal_info = strategy.get_signal(self.current_data.copy())
@@ -557,9 +833,57 @@ class TradingMainWindow(QMainWindow):
                 signal_type = signal_info['signal']
                 confidence = signal_info.get('confidence', 0)
                 reason = signal_info.get('reason', 'No reason provided')
-                entry_price = signal_info.get('entry_price', self.current_price)
-                stop_loss = signal_info.get('stop_loss', 0)
-                target = signal_info.get('target', 0)
+                
+                # For NIFTY options, fetch real option data
+                option_data = None
+                if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
+                    option_data = self.option_fetcher.get_option_data(
+                        signal_type=signal_type,
+                        spot_price=self.current_price,
+                        atr=atr
+                    )
+                    
+                    # Use option premium as entry price
+                    entry_price = option_data['premium']
+                    stop_loss = option_data['stop_loss']
+                    target = option_data['target']
+                    
+                    # Add option details to signal_info
+                    signal_info['entry_price'] = entry_price
+                    signal_info['stop_loss'] = stop_loss
+                    signal_info['target'] = target
+                    signal_info['strike'] = option_data['strike']
+                    signal_info['option_type'] = option_data['option_type']
+                    signal_info['spot_price'] = option_data['spot_price']
+                
+                # For GOLD options, fetch from MCX via instrument master
+                elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+                    option_data = self.get_gold_option_data(
+                        signal_type=signal_type,
+                        spot_price=self.gold_spot_price,
+                        atr=atr
+                    )
+                    
+                    if option_data:
+                        entry_price = option_data['premium']
+                        stop_loss = option_data['stop_loss']
+                        target = option_data['target']
+                        
+                        signal_info['entry_price'] = entry_price
+                        signal_info['stop_loss'] = stop_loss
+                        signal_info['target'] = target
+                        signal_info['strike'] = option_data['strike']
+                        signal_info['option_type'] = option_data['option_type']
+                        signal_info['spot_price'] = option_data['spot_price']
+                    else:
+                        entry_price = signal_info.get('entry_price', self.current_price)
+                        stop_loss = signal_info.get('stop_loss', 0)
+                        target = signal_info.get('target', 0)
+                else:
+                    # For other instruments, use existing values
+                    entry_price = signal_info.get('entry_price', self.current_price)
+                    stop_loss = signal_info.get('stop_loss', 0)
+                    target = signal_info.get('target', 0)
                 
                 # Only update UI if this is the currently selected strategy
                 if strategy_name == self.current_strategy:
@@ -568,23 +892,49 @@ class TradingMainWindow(QMainWindow):
                     self.signal_label.setText(f"[SIGNAL] {signal_type}")
                     self.signal_label.setStyleSheet(f"background-color: {color}; color: white; padding: 10px; border-radius: 5px;")
                     
-                    details = f"""
-<b>Strategy:</b> {strategy_name}<br>
+                    # Build details display
+                    details = f"""<b>Strategy:</b> {strategy_name}<br>
 <b>Signal Type:</b> {signal_type}<br>
-<b>Confidence:</b> {confidence:.1%}<br>
-<b>Entry Price:</b> ₹{entry_price:.2f}<br>
+<b>Confidence:</b> {confidence:.1%}<br>"""
+                    
+                    # Add option details for NIFTY / GOLD
+                    if option_data:
+                        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 75)
+                        instrument_name = 'NIFTY' if self.current_instrument == 'NIFTY 50' else self.current_instrument
+                        details += f"""<b>Spot Price:</b> ₹{option_data['spot_price']:,.2f}<br>
+<b>Option:</b> {instrument_name} {option_data['strike']} {option_data['option_type']}<br>
+<b>Premium:</b> ₹{entry_price:.2f}<br>
+<b>Stop Loss:</b> ₹{stop_loss:.2f} (-30%)<br>
+<b>Target:</b> ₹{target:.2f} (+50%)<br>
+<b>Cost ({lot_size} qty):</b> ₹{entry_price * lot_size:,.2f}<br>"""
+                    else:
+                        details += f"""<b>Entry Price:</b> ₹{entry_price:.2f}<br>
 <b>Stop Loss:</b> ₹{stop_loss:.2f}<br>
-<b>Target:</b> ₹{target:.2f}<br>
-<b>Risk/Reward:</b> 1:{(target-entry_price)/(entry_price-stop_loss):.2f}<br>
-<br>
-<b>Reason:</b> {reason}
-            """
+<b>Target:</b> ₹{target:.2f}<br>"""
+                    
+                    if stop_loss > 0 and entry_price > stop_loss:
+                        risk_reward = (target - entry_price) / (entry_price - stop_loss)
+                        details += f"<b>Risk/Reward:</b> 1:{risk_reward:.2f}<br>"
+                    
+                    details += f"<br><b>Reason:</b> {reason}"
+                    
                     self.signal_details.setHtml(details)
                     self.manual_trade_btn.setEnabled(True)
                 
-                # Auto-execute if enabled for ANY strategy
+                # Auto-execute if enabled AND strategy is selected for auto trading
                 if self.auto_trade_btn.isChecked():
-                    self.execute_trade(signal_info, strategy_name)
+                    if strategy_name in self.selected_auto_trade_strategies:
+                        # Check if strategy already has an open position (prevent duplicate trades)
+                        engine_key = f"{self.current_instrument}_{strategy_name}"
+                        engine = self.trading_engines.get(engine_key)
+                        
+                        if engine and len(engine.open_positions) == 0:
+                            print(f"[AUTO-TRADE] Executing {strategy_name} - Selected strategies: {self.selected_auto_trade_strategies}")
+                            self.execute_trade(signal_info, strategy_name)
+                        elif engine and len(engine.open_positions) > 0:
+                            print(f"[AUTO-TRADE] Skipping {strategy_name} - Already has {len(engine.open_positions)} open position(s)")
+                    else:
+                        print(f"[AUTO-TRADE] Skipping {strategy_name} - Not in selected strategies: {self.selected_auto_trade_strategies}")
         
         # Clear signal display if current strategy has no signal
         current_strategy = self.strategies[self.current_strategy]
@@ -594,6 +944,29 @@ class TradingMainWindow(QMainWindow):
             self.signal_label.setStyleSheet("background-color: gray; color: white; padding: 10px; border-radius: 5px;")
             self.signal_details.setPlainText("Waiting for trading opportunity...")
             self.manual_trade_btn.setEnabled(False)
+    
+    def calculate_atr(self, period: int = 14) -> float:
+        """Calculate Average True Range for volatility estimation"""
+        if self.current_data is None or len(self.current_data) < period:
+            return 50.0  # Default ATR
+        
+        try:
+            df = self.current_data.copy()
+            
+            # Calculate True Range
+            df['H-L'] = df['High'] - df['Low']
+            df['H-PC'] = abs(df['High'] - df['Close'].shift(1))
+            df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))
+            
+            df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+            
+            # Calculate ATR
+            atr = df['TR'].rolling(window=period).mean().iloc[-1]
+            
+            return float(atr) if not pd.isna(atr) else 50.0
+        except Exception as e:
+            print(f"[WARNING] ATR calculation error: {e}")
+            return 50.0
     
     def execute_manual_trade(self):
         """Execute trade manually from current signal"""
@@ -642,26 +1015,50 @@ class TradingMainWindow(QMainWindow):
             QMessageBox.information(self, "Trade Closed", "This trade is already closed.")
             return
         
+        # Get current exit price (option premium for NIFTY/GOLD options, spot for others)
+        exit_price = self.current_price
+        if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
+            if hasattr(trade, 'strike') and trade.strike > 0 and hasattr(trade, 'option_type'):
+                atr = self.calculate_atr()
+                exit_price = self.option_fetcher.get_option_ltp(
+                    trade.strike,
+                    trade.option_type,
+                    self.current_price,
+                    atr
+                )
+        elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+            if hasattr(trade, 'strike') and trade.strike > 0 and hasattr(trade, 'option_type'):
+                exit_price = self.get_gold_option_ltp(
+                    trade.strike,
+                    trade.option_type,
+                    self.gold_spot_price
+                )
+        
+        # Calculate potential P&L
+        potential_pnl = (exit_price - trade.entry_price) * trade.quantity
+        if trade.signal_type == 'PUT':
+            potential_pnl = (trade.entry_price - exit_price) * trade.quantity
+        
         # Confirm exit
         reply = QMessageBox.question(
             self, 
             "Confirm Exit", 
-            f"Exit {trade.signal_type} trade at current price ₹{self.current_price:.2f}?\n\n"
+            f"Exit {trade.signal_type} trade at ₹{exit_price:.2f}?\n\n"
             f"Entry: ₹{trade.entry_price:.2f}\n"
-            f"Current P&L: ₹{trade.pnl:,.2f}",
+            f"Potential P&L: ₹{potential_pnl:,.2f}",
             QMessageBox.Yes | QMessageBox.No
         )
         
         if reply == QMessageBox.Yes:
             # Close the position
-            success = engine.close_position(trade, self.current_price, "MANUAL_EXIT")
+            success = engine.close_position(trade, exit_price, "MANUAL_EXIT")
             
             if success:
                 self.update_trade_table(strategy_name)
                 QMessageBox.information(
                     self, 
                     "Trade Exited", 
-                    f"Trade {trade.trade_id} closed at ₹{self.current_price:.2f}\n"
+                    f"Trade {trade.trade_id} closed at ₹{exit_price:.2f}\n"
                     f"P&L: ₹{trade.pnl:,.2f}"
                 )
             else:
@@ -673,35 +1070,65 @@ class TradingMainWindow(QMainWindow):
         if strategy_name is None:
             strategy_name = self.current_strategy
         
+        print(f"[EXECUTE_TRADE] Strategy: {strategy_name}, Signal: {signal_info['signal']}")
+        
         # Get the trading engine for current instrument and strategy
         engine_key = f"{self.current_instrument}_{strategy_name}"
         engine = self.trading_engines.get(engine_key)
         if not engine:
             return
         
-        # Execute trade
+        # Extract option details if available
+        strike = signal_info.get('strike', 0)
+        option_type = signal_info.get('option_type', '')
+        spot_price = signal_info.get('spot_price', self.current_price)
+        entry_price = signal_info.get('entry_price', self.current_price)
+        
+        # Get instrument-specific lot size
+        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 75)
+        instrument_prefix = 'NIFTY' if self.current_instrument == 'NIFTY 50' else self.current_instrument
+        
+        # Execute trade with all option parameters
         trade = engine.open_position(
             signal_type=signal_info['signal'],
-            entry_price=signal_info.get('entry_price', self.current_price),
+            entry_price=entry_price,
             stop_loss=signal_info.get('stop_loss', 0),
             target=signal_info.get('target', 0),
-            quantity=75,  # NIFTY 50 lot size
+            quantity=lot_size,
             strategy=strategy_name,
-            notes=signal_info.get('reason', '')
+            notes=signal_info.get('reason', ''),
+            strike=strike,
+            option_type=option_type,
+            spot_price=spot_price
         )
-        
+            
         if trade:
             self.update_trade_table(strategy_name)
-            print(f"[TRADE EXECUTED] {strategy_name}: {trade.signal_type} @ Rs.{trade.entry_price:.2f}")
+            
+            # Log trade details
+            if strike > 0 and option_type:
+                print(f"[TRADE EXECUTED] {strategy_name}: {trade.signal_type}")
+                print(f"  Option: {instrument_prefix} {strike} {option_type}")
+                print(f"  Spot: Rs.{spot_price:,.2f}")
+                print(f"  Premium: Rs.{entry_price:.2f} | Total: Rs.{entry_price * lot_size:,.2f}")
+                print(f"  SL: Rs.{trade.stop_loss:.2f} | Target: Rs.{trade.target:.2f}")
+            else:
+                print(f"[TRADE EXECUTED] {strategy_name}: {trade.signal_type} @ Rs.{trade.entry_price:.2f}")
             
             # Only show message box if not in auto-trade mode
             if not self.auto_trade_btn.isChecked():
-                QMessageBox.information(self, "Trade Executed", 
-                                       f"Strategy: {strategy_name}\n"
-                                       f"Option: NIFTY {trade.strike} {trade.option_type}\n"
-                                       f"Premium: Rs.{trade.entry_price:.2f}\n"
-                                       f"Total Cost: Rs.{trade.entry_price * 75:,.2f}\n"
-                                       f"SL: Rs.{trade.stop_loss:.2f} | Target: Rs.{trade.target:.2f}")
+                if strike > 0 and option_type:
+                    QMessageBox.information(self, "Trade Executed", 
+                                           f"Strategy: {strategy_name}\n"
+                                           f"Option: {instrument_prefix} {strike} {option_type}\n"
+                                           f"Premium: Rs.{entry_price:.2f}\n"
+                                           f"Total Cost: Rs.{entry_price * lot_size:,.2f}\n"
+                                           f"SL: Rs.{trade.stop_loss:.2f} | Target: Rs.{trade.target:.2f}")
+                else:
+                    QMessageBox.information(self, "Trade Executed", 
+                                           f"Strategy: {strategy_name}\n"
+                                           f"Entry: Rs.{entry_price:.2f}\n"
+                                           f"SL: Rs.{trade.stop_loss:.2f} | Target: Rs.{trade.target:.2f}")
     
     def show_portfolio_details(self):
         """Show detailed portfolio statistics dialog"""
@@ -816,17 +1243,62 @@ class TradingMainWindow(QMainWindow):
     
     def update_ui(self):
         """Update UI elements periodically"""
-        # Update price
-        if self.current_price > 0:
+        # Refresh Gold spot price from XTS if GOLD selected
+        if self.current_instrument == 'GOLD' and self.gold_option_fetcher and self.gold_future_id:
+            try:
+                quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
+                if quote:
+                    spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                    if spot > 0:
+                        self.gold_spot_price = spot
+            except Exception:
+                pass
+        
+        # Update price display
+        if self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+            self.price_label.setText(f"MCX Gold: ₹{self.gold_spot_price:,.1f}")
+        elif self.current_price > 0:
             self.price_label.setText(f"Price: ₹{self.current_price:.2f}")
         
         # Update positions for all strategies of current instrument with current price
         if self.current_price > 0:
+            atr = self.calculate_atr()
+            
             for strategy_name in self.strategies.keys():
                 engine_key = f"{self.current_instrument}_{strategy_name}"
                 engine = self.trading_engines.get(engine_key)
                 if engine:
-                    engine.update_positions(self.current_price)
+                    # For NIFTY options, update with current option premium
+                    if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
+                        # Update each open position with its current option premium
+                        for position in engine.open_positions:
+                            if hasattr(position, 'strike') and hasattr(position, 'option_type') and position.strike > 0:
+                                current_premium = self.option_fetcher.get_option_ltp(
+                                    position.strike,
+                                    position.option_type,
+                                    self.current_price,
+                                    atr
+                                )
+                                engine.update_positions(current_premium)
+                            else:
+                                engine.update_positions(self.current_price)
+                    
+                    # For GOLD options, update with current MCX option premium
+                    elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+                        for position in engine.open_positions:
+                            if hasattr(position, 'strike') and hasattr(position, 'option_type') and position.strike > 0:
+                                current_premium = self.get_gold_option_ltp(
+                                    position.strike,
+                                    position.option_type,
+                                    self.gold_spot_price
+                                )
+                                engine.update_positions(current_premium)
+                            else:
+                                engine.update_positions(self.gold_spot_price)
+                    else:
+                        # For other instruments, use spot price
+                        engine.update_positions(self.current_price)
+                    
                     # Update trade table if any position closed
                     prev_key = f'_prev_positions_{engine_key}'
                     if len(engine.open_positions) != getattr(self, prev_key, 0):
@@ -873,21 +1345,54 @@ class TradingMainWindow(QMainWindow):
         table.setRowCount(len(all_trades))
         
         for i, trade in enumerate(all_trades):
+            # Column 0: Time
             table.setItem(i, 0, QTableWidgetItem(trade.entry_time.strftime('%Y-%m-%d %H:%M')))
-            table.setItem(i, 1, QTableWidgetItem(trade.signal_type))
-            table.setItem(i, 2, QTableWidgetItem(f"₹{trade.entry_price:.2f}"))
-            table.setItem(i, 3, QTableWidgetItem(f"₹{trade.exit_price:.2f}" if trade.exit_price else "-"))
-            table.setItem(i, 4, QTableWidgetItem(f"₹{trade.stop_loss:.2f}"))
-            table.setItem(i, 5, QTableWidgetItem(f"₹{trade.target:.2f}"))
             
+            # Column 1: Signal Type (CALL/PUT)
+            signal_item = QTableWidgetItem(trade.signal_type)
+            if trade.signal_type == 'CALL':
+                signal_item.setForeground(QColor('green'))
+            else:
+                signal_item.setForeground(QColor('red'))
+            table.setItem(i, 1, signal_item)
+            
+            # Column 2: Strike/Type (Option details)
+            if trade.strike > 0 and trade.option_type:
+                strike_text = f"{trade.strike} {trade.option_type}"
+            else:
+                strike_text = "-"
+            table.setItem(i, 2, QTableWidgetItem(strike_text))
+            
+            # Column 3: Premium (Entry)
+            table.setItem(i, 3, QTableWidgetItem(f"₹{trade.entry_price:.2f}"))
+            
+            # Column 4: Current/Exit Price
+            if trade.exit_price:
+                current_text = f"₹{trade.exit_price:.2f}"
+            elif trade.current_price > 0:
+                current_text = f"₹{trade.current_price:.2f}"
+            else:
+                current_text = "-"
+            table.setItem(i, 4, QTableWidgetItem(current_text))
+            
+            # Column 5: Stop Loss
+            table.setItem(i, 5, QTableWidgetItem(f"₹{trade.stop_loss:.2f}"))
+            
+            # Column 6: Target
+            table.setItem(i, 6, QTableWidgetItem(f"₹{trade.target:.2f}"))
+            
+            # Column 7: P&L
             pnl = trade.pnl if trade.pnl else 0
             pnl_item = QTableWidgetItem(f"₹{pnl:,.2f}")
             if pnl > 0:
                 pnl_item.setForeground(QColor('green'))
+                pnl_item.setBackground(QColor(230, 255, 230))  # Light green
             elif pnl < 0:
                 pnl_item.setForeground(QColor('red'))
-            table.setItem(i, 6, pnl_item)
+                pnl_item.setBackground(QColor(255, 230, 230))  # Light red
+            table.setItem(i, 7, pnl_item)
             
+            # Column 8: Status
             status = trade.status
             status_item = QTableWidgetItem(status)
             if status == 'OPEN':
@@ -896,15 +1401,18 @@ class TradingMainWindow(QMainWindow):
                 status_item.setBackground(QColor('lightgreen'))
             elif status in ['STOP_LOSS', 'LOSS']:
                 status_item.setBackground(QColor('lightcoral'))
-            table.setItem(i, 7, status_item)
+            table.setItem(i, 8, status_item)
             
+            # Column 9: Duration
             duration = ""
             if trade.exit_time:
                 duration_seconds = (trade.exit_time - trade.entry_time).total_seconds()
                 duration = f"{int(duration_seconds // 60)} min"
-            table.setItem(i, 8, QTableWidgetItem(duration))
+            table.setItem(i, 9, QTableWidgetItem(duration))
             
-            table.setItem(i, 9, QTableWidgetItem(trade.notes[:50]))
+            # Column 10: Notes
+            notes_text = trade.notes[:50] if trade.notes else ""
+            table.setItem(i, 10, QTableWidgetItem(notes_text))
     
     def update_strategy_info(self):
         """Update strategy information display"""
@@ -915,11 +1423,52 @@ class TradingMainWindow(QMainWindow):
     def toggle_auto_trade(self, checked):
         """Toggle auto-trading"""
         if checked:
-            self.auto_trade_btn.setText("Disable Auto-Trade")
-            self.auto_trade_btn.setStyleSheet("background-color: green; color: white;")
+            # Show strategy selection dialog
+            dialog = StrategySelectionDialog(
+                list(self.strategies.keys()),
+                self.selected_auto_trade_strategies,
+                self
+            )
+            
+            if dialog.exec_() == QDialog.Accepted:
+                selected = dialog.get_selected_strategies()
+                
+                # Check if at least one strategy is selected
+                if not selected:
+                    QMessageBox.warning(
+                        self,
+                        "No Strategies Selected",
+                        "Please select at least one strategy for auto trading."
+                    )
+                    self.auto_trade_btn.setChecked(False)
+                    return
+                
+                # Update selected strategies
+                self.selected_auto_trade_strategies = selected
+                print(f"[AUTO-TRADE CONFIG] Selected strategies: {self.selected_auto_trade_strategies}")
+                
+                # Update button appearance
+                self.auto_trade_btn.setText("Disable Auto-Trade")
+                self.auto_trade_btn.setStyleSheet("background-color: green; color: white;")
+                
+                # Show confirmation message
+                strategy_list = "\n• ".join(selected)
+                QMessageBox.information(
+                    self,
+                    "Auto Trading Enabled",
+                    f"Auto trading enabled for:\n\n• {strategy_list}"
+                )
+            else:
+                # User cancelled, uncheck the button
+                self.auto_trade_btn.setChecked(False)
         else:
             self.auto_trade_btn.setText("Enable Auto-Trade")
             self.auto_trade_btn.setStyleSheet("")
+            QMessageBox.information(
+                self,
+                "Auto Trading Disabled",
+                "Auto trading has been disabled."
+            )
     
     def save_all_trades(self):
         """Save all trades to JSON files for each instrument-strategy combination"""
@@ -943,8 +1492,63 @@ class TradingMainWindow(QMainWindow):
             filename = f"trades_{instrument}_{strategy}.json"
             try:
                 engine.load_trades(filename)
+                print(f"[INFO] Loaded trades from {filename}")
             except FileNotFoundError:
                 pass  # No saved file yet
+            except Exception as e:
+                print(f"[WARNING] Failed to load {filename}: {e}")
+    
+    def reset_all_data(self):
+        """Reset all trading data - capital and trades"""
+        reply = QMessageBox.question(
+            self,
+            "Reset All Data",
+            "This will delete ALL trades and reset capital to ₹10,00,000 for all strategies.\n\n"
+            "This action cannot be undone.\n\nAre you sure?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # Reset all engines in memory
+                for engine_key in self.trading_engines.keys():
+                    self.trading_engines[engine_key] = PaperTradingEngine(initial_capital=1000000)
+                
+                # Delete all trade files
+                import os
+                import glob
+                trade_files = glob.glob("trades_*.json")
+                for file in trade_files:
+                    try:
+                        os.remove(file)
+                        print(f"[INFO] Deleted {file}")
+                    except Exception as e:
+                        print(f"[WARNING] Could not delete {file}: {e}")
+                
+                # Update UI
+                for strategy_name in self.strategies.keys():
+                    self.update_trade_table(strategy_name)
+                
+                self.update_ui()
+                
+                QMessageBox.information(
+                    self,
+                    "Reset Complete",
+                    "All trades cleared and capital reset to ₹10,00,000 per strategy.\n\n"
+                    "Ready for fresh option trading!"
+                )
+                
+                print("\n" + "="*70)
+                print("   DATA RESET COMPLETE")
+                print("="*70)
+                print(f"Starting Capital: ₹10,00,000 (All Strategies)")
+                print(f"Total Trades: 0")
+                print(f"Trade History: Cleared")
+                print("="*70 + "\n")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Reset Failed", f"Error resetting data: {e}")
     
     def closeEvent(self, event):
         """Handle window close event"""
