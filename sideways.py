@@ -95,7 +95,7 @@ RISK MANAGEMENT FRAMEWORK:
 ================================================================================
 
 Position Sizing:
-  • Base: 1 lot per signal (75 shares)
+  • Base: 1 lot per signal (65 shares)
   • Capital per trade: ₹30,000 margin
   • Max concurrent positions: 2-3 lots
   • Max daily loss: 2% of account (₹2,000 on ₹100K)
@@ -765,7 +765,7 @@ for sig_idx, sig in enumerate(signals_data):
     
     sig['Exit_Price'] = exit_price
     sig['Backtest_Profit_Points'] = profit
-    sig['Backtest_Profit_Rs'] = profit * 75  # Nifty multiplier
+    sig['Backtest_Profit_Rs'] = profit * 65  # Nifty multiplier (1 lot = 65 shares)
     sig['Trade_Status'] = status
     
     validated_signals.append(sig)
@@ -882,7 +882,7 @@ if validated_signals:
     print(f"   SHORT Performance: {short_wins} wins, {short_losses} losses ({short_win_rate:.2f}% win rate) | Profit: ₹{short_profit:,.2f}")
     print(f"   BUY Performance: {buy_wins} wins, {buy_losses} losses ({buy_win_rate:.2f}% win rate) | Profit: ₹{buy_profit:,.2f}")
     
-    print(f"\n💰 FINANCIAL PERFORMANCE (NIFTY 50, 1 lot = 75 shares)")
+    print(f"\n💰 FINANCIAL PERFORMANCE (NIFTY 50, 1 lot = 65 shares)")
     print(f"   Total Profit: ₹{total_profit:,.2f}")
     print(f"   Gross Wins: ₹{total_win_profit:,.2f}")
     print(f"   Gross Losses: ₹{total_loss:,.2f}")

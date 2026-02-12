@@ -710,9 +710,9 @@ class OpeningRangeBreakout:
                     
                     # Calculate P&L
                     if direction == 'BUY':
-                        pnl = (exit_price - entry_price) * 75 * lot_size  # NIFTY lot size = 75
+                        pnl = (exit_price - entry_price) * 65 * lot_size  # NIFTY lot size = 65
                     else:
-                        pnl = (entry_price - exit_price) * 75 * lot_size
+                        pnl = (entry_price - exit_price) * 65 * lot_size
                     
                     trade_record = {
                         'Date': str(date_obj),

@@ -39,30 +39,51 @@ class Trade:
         self.current_price = price
         
         if self.status == "OPEN":
-            if self.signal_type == "CALL":
+            # For option trades (both CALL/PUT), we BUY the option
+            # P&L = (current_premium - entry_premium) * quantity
+            # PUT option premium rises when spot falls, so this is always correct
+            if self.strike > 0 and self.option_type:
+                # Option trade - always long (bought option)
                 self.pnl = (price - self.entry_price) * self.quantity
-            else:  # PUT
-                self.pnl = (self.entry_price - price) * self.quantity
+            else:
+                # Spot/futures trade - directional
+                if self.signal_type == "CALL":
+                    self.pnl = (price - self.entry_price) * self.quantity
+                else:  # PUT (short)
+                    self.pnl = (self.entry_price - price) * self.quantity
     
     def check_exit_conditions(self, current_price: float) -> bool:
         """Check if stop loss or target hit"""
         if self.status != "OPEN":
             return False
         
-        if self.signal_type == "CALL":
+        # For option trades (both CALL/PUT), we BUY the option
+        # SL triggers when premium drops below stop_loss
+        # Target triggers when premium rises above target
+        if self.strike > 0 and self.option_type:
+            # Option trade - always long position
             if current_price >= self.target:
                 self.close_trade(current_price, "TARGET")
                 return True
             elif current_price <= self.stop_loss:
                 self.close_trade(current_price, "STOP_LOSS")
                 return True
-        else:  # PUT
-            if current_price <= self.target:
-                self.close_trade(current_price, "TARGET")
-                return True
-            elif current_price >= self.stop_loss:
-                self.close_trade(current_price, "STOP_LOSS")
-                return True
+        else:
+            # Spot/futures trade - directional
+            if self.signal_type == "CALL":
+                if current_price >= self.target:
+                    self.close_trade(current_price, "TARGET")
+                    return True
+                elif current_price <= self.stop_loss:
+                    self.close_trade(current_price, "STOP_LOSS")
+                    return True
+            else:  # PUT (short)
+                if current_price <= self.target:
+                    self.close_trade(current_price, "TARGET")
+                    return True
+                elif current_price >= self.stop_loss:
+                    self.close_trade(current_price, "STOP_LOSS")
+                    return True
         
         return False
     
@@ -72,10 +93,17 @@ class Trade:
         self.exit_time = datetime.now()
         self.status = status
         
-        if self.signal_type == "CALL":
+        # For option trades (both CALL/PUT), we BUY the option
+        # P&L = (exit_premium - entry_premium) * quantity
+        if self.strike > 0 and self.option_type:
+            # Option trade - always long (bought option)
             self.pnl = (exit_price - self.entry_price) * self.quantity
-        else:  # PUT
-            self.pnl = (self.entry_price - exit_price) * self.quantity
+        else:
+            # Spot/futures trade - directional
+            if self.signal_type == "CALL":
+                self.pnl = (exit_price - self.entry_price) * self.quantity
+            else:  # PUT (short)
+                self.pnl = (self.entry_price - exit_price) * self.quantity
     
     def to_dict(self):
         """Convert to dictionary for JSON serialization"""

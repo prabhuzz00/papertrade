@@ -1,7 +1,46 @@
 {
   "initial_capital": 1000000,
-  "current_capital": 1000000,
+  "current_capital": 1722728.0,
   "open_positions": [],
-  "closed_trades": [],
-  "trade_counter": 0
+  "closed_trades": [
+    {
+      "trade_id": "BOL-0001",
+      "signal_type": "CALL",
+      "entry_price": 3965.6,
+      "entry_time": "2026-02-11T16:24:01.273453",
+      "quantity": 100,
+      "stop_loss": 2775.9199999999996,
+      "target": 5948.4,
+      "strategy": "Bollinger + MACD",
+      "notes": "Bullish Breakout - RSI: 69.4, MACD Bullish",
+      "strike": 159000,
+      "option_type": "CE",
+      "spot_price": 158624,
+      "exit_price": 4588,
+      "exit_time": "2026-02-11T16:46:50.446131",
+      "status": "MANUAL_EXIT",
+      "pnl": 62240.00000000001,
+      "current_price": 4588
+    },
+    {
+      "trade_id": "BOL-0002",
+      "signal_type": "CALL",
+      "entry_price": 5133,
+      "entry_time": "2026-02-11T17:28:03.487503",
+      "quantity": 100,
+      "stop_loss": 3593.1,
+      "target": 7699.5,
+      "strategy": "Bollinger + MACD",
+      "notes": "Bullish Breakout - RSI: 69.7, MACD Bullish",
+      "strike": 160000,
+      "option_type": "CE",
+      "spot_price": 160100.0,
+      "exit_price": 4459,
+      "exit_time": "2026-02-11T18:28:34.368381",
+      "status": "MANUAL_EXIT",
+      "pnl": -67400,
+      "current_price": 4459
+    }
+  ],
+  "trade_counter": 2
 }

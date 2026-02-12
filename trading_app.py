@@ -44,6 +44,7 @@ from strategy_wrappers import (BollingerMACDStrategy,
 from paper_trading_engine import PaperTradingEngine, Trade
 from option_price_fetcher import OptionPriceFetcher
 from fetch_gold_atm_options import GoldATMOptionFetcher
+from fetch_nifty_atm_options import NiftyATMOptionFetcher
 
 
 class LiveDataThread(QThread):
@@ -77,7 +78,6 @@ class LiveDataThread(QThread):
                     # If XTS spot available, update the last close with real-time price
                     if xts_spot > 0:
                         df.loc[df.index[-1], 'Close'] = xts_spot
-                        print(f"✅ XTS Spot: Rs.{xts_spot:.2f}")
                     
                     self.data_ready.emit(df)
                     
@@ -85,9 +85,129 @@ class LiveDataThread(QThread):
                 if not self._stop_requested:
                     print(f"Error fetching data: {e}")
             
-            # Wait 1 second before next update
+            # Wait 5 seconds before next update (was 1s - too frequent)
             if not self._stop_requested:
-                self.msleep(1000)
+                self.msleep(5000)
+    
+    def stop(self):
+        """Stop the thread"""
+        self._stop_requested = True
+        self.running = False
+
+
+class PremiumUpdateThread(QThread):
+    """Background thread that fetches option premiums without blocking UI.
+    
+    Fetches live premiums for all open positions and caches them.
+    The UI thread reads from the cache instead of making API calls.
+    """
+    premiums_updated = pyqtSignal(dict)  # Emits {(strike, option_type): premium}
+    gold_spot_updated = pyqtSignal(float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = True
+        self._stop_requested = False
+        
+        # References set by the main window
+        self.nifty_option_fetcher = None
+        self.gold_option_fetcher = None
+        self.gold_future_id = None
+        self.gold_options_cache = {}  # Set from main window
+        self.option_fetcher = None  # Legacy fallback
+        
+        # Positions to track: list of (strike, option_type, instrument)
+        self._positions_to_track = []
+        self._current_instrument = 'NIFTY 50'
+        self._current_price = 0
+        self._atr = 50.0
+        
+    def set_positions(self, positions, instrument, current_price, atr):
+        """Update the list of positions to track (called from UI thread)"""
+        self._positions_to_track = positions  # [(strike, option_type), ...]
+        self._current_instrument = instrument
+        self._current_price = current_price
+        self._atr = atr
+    
+    def run(self):
+        """Fetch premiums every 3 seconds in background"""
+        while self.running and not self._stop_requested:
+            try:
+                premiums = {}
+                
+                # Fetch NIFTY option premiums
+                if self._current_instrument == 'NIFTY 50' and self._positions_to_track:
+                    for strike, option_type in self._positions_to_track:
+                        if self._stop_requested:
+                            break
+                        if self.nifty_option_fetcher:
+                            try:
+                                price, source = self.nifty_option_fetcher.get_option_ltp(
+                                    strike, option_type, self._current_price, self._atr
+                                )
+                                premiums[(strike, option_type)] = price
+                            except Exception:
+                                pass
+                        elif self.option_fetcher:
+                            try:
+                                price = self.option_fetcher.get_option_ltp(
+                                    strike, option_type, self._current_price, self._atr
+                                )
+                                premiums[(strike, option_type)] = price
+                            except Exception:
+                                pass
+                
+                # Fetch GOLD spot + option premiums
+                elif self._current_instrument == 'GOLD':
+                    if self.gold_option_fetcher and self.gold_future_id:
+                        try:
+                            quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
+                            if quote:
+                                spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                                if spot > 0:
+                                    self.gold_spot_updated.emit(spot)
+                        except Exception:
+                            pass
+                    
+                    if not self._positions_to_track:
+                        pass  # No positions to track
+                    elif not self.gold_option_fetcher:
+                        print("[GOLD-THREAD] No gold_option_fetcher available")
+                    elif not self.gold_options_cache:
+                        print("[GOLD-THREAD] gold_options_cache is empty")
+                    
+                    for strike, option_type in self._positions_to_track:
+                        if self._stop_requested:
+                            break
+                        if self.gold_option_fetcher and self.gold_options_cache:
+                            try:
+                                key = (strike, option_type)
+                                if key in self.gold_options_cache:
+                                    opt_info = self.gold_options_cache[key]
+                                    quote = self.gold_option_fetcher.get_quote(opt_info['instrument_id'])
+                                    if quote:
+                                        ltp = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                                        if ltp > 0:
+                                            premiums[key] = ltp
+                                        else:
+                                            print(f"[GOLD-THREAD] {strike} {option_type}: LTP=0, Close=0")
+                                    else:
+                                        print(f"[GOLD-THREAD] {strike} {option_type}: get_quote returned None")
+                                else:
+                                    print(f"[GOLD-THREAD] Key ({strike}, {option_type}) not in gold_options_cache. Available strikes: {sorted(set(k[0] for k in self.gold_options_cache.keys()))[:10]}")
+                            except Exception as e:
+                                print(f"[GOLD-THREAD] Error fetching {strike} {option_type}: {e}")
+                
+                if premiums and not self._stop_requested:
+                    self.premiums_updated.emit(premiums)
+                    
+            except Exception as e:
+                if not self._stop_requested:
+                    print(f"[WARNING] Premium update error: {e}")
+            
+            # Wait 3 seconds between updates
+            if not self._stop_requested:
+                self.msleep(3000)
     
     def stop(self):
         """Stop the thread"""
@@ -278,7 +398,7 @@ class TradingMainWindow(QMainWindow):
     
     # Instrument configurations
     INSTRUMENTS = {
-        'NIFTY 50': {'symbol': '^NSEI', 'name': 'NIFTY 50', 'xts_enabled': True, 'interval': '5m', 'lot_size': 75},
+        'NIFTY 50': {'symbol': '^NSEI', 'name': 'NIFTY 50', 'xts_enabled': True, 'interval': '5m', 'lot_size': 65},
         'CRUDE OIL': {'symbol': 'CL=F', 'name': 'Crude Oil', 'xts_enabled': False, 'interval': '1m', 'lot_size': 1},
         'GOLD': {'symbol': 'GC=F', 'name': 'Gold', 'xts_enabled': True, 'interval': '1m', 'lot_size': 100}
     }
@@ -318,8 +438,18 @@ class TradingMainWindow(QMainWindow):
         # Store selected strategies for auto trading
         self.selected_auto_trade_strategies = list(self.strategies.keys())  # All selected by default
         
-        # Initialize option price fetcher
+        # Initialize option price fetcher (legacy - used as fallback)
         self.option_fetcher = OptionPriceFetcher(use_xts=True)
+        
+        # Premium cache: {(strike, option_type): premium} - updated by background thread
+        self._premium_cache = {}
+        self._premium_cache_time = None
+        
+        # Initialize NIFTY option fetcher (instrument master approach - real premiums)
+        self.nifty_option_fetcher = None
+        self.nifty_options_cache = {}
+        self.nifty_expiry = None
+        self.init_nifty_options()
         
         # Initialize Gold option fetcher (MCX via instrument master)
         self.gold_option_fetcher = None
@@ -329,6 +459,17 @@ class TradingMainWindow(QMainWindow):
         self.gold_future_id = None
         self.gold_expiry = None
         self.init_gold_options()
+        
+        # Start background premium update thread (fetches option prices without blocking UI)
+        self.premium_thread = PremiumUpdateThread()
+        self.premium_thread.nifty_option_fetcher = self.nifty_option_fetcher
+        self.premium_thread.gold_option_fetcher = self.gold_option_fetcher
+        self.premium_thread.gold_future_id = self.gold_future_id
+        self.premium_thread.gold_options_cache = self.gold_options_cache
+        self.premium_thread.option_fetcher = self.option_fetcher
+        self.premium_thread.premiums_updated.connect(self._on_premiums_updated)
+        self.premium_thread.gold_spot_updated.connect(self._on_gold_spot_updated)
+        self.premium_thread.start()
         
         # Setup UI
         self.setup_ui()
@@ -345,7 +486,7 @@ class TradingMainWindow(QMainWindow):
         self.data_thread.data_ready.connect(self.on_data_update)
         self.data_thread.start()
         
-        # Setup timer for UI updates
+        # Setup timer for UI updates (fast - only reads cached data, no API calls)
         self.ui_timer = QTimer()
         self.ui_timer.timeout.connect(self.update_ui)
         self.ui_timer.start(1000)  # Update every second
@@ -362,7 +503,11 @@ class TradingMainWindow(QMainWindow):
         print("="*70)
         print(f"Starting Capital: ₹{1000000:,} (10 Lakhs)")
         print(f"Trading Mode: Paper Trading (Options)")
-        print(f"NIFTY Lot Size: 75 | GOLD Lot Size: 100")
+        print(f"NIFTY Lot Size: 65 | GOLD Lot Size: 100")
+        if self.nifty_options_cache:
+            print(f"NIFTY Options: {len(self.nifty_options_cache)} contracts (LIVE from XTS), expiry={self.nifty_expiry}")
+        else:
+            print(f"NIFTY Options: Using estimation model (XTS master unavailable)")
         if self.gold_spot_price > 0:
             print(f"MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
         if self.gold_expiry:
@@ -386,6 +531,22 @@ class TradingMainWindow(QMainWindow):
                 print("No data available. Market might be closed.")
         except Exception as e:
             print(f"Error loading initial data: {e}")
+    
+    def init_nifty_options(self):
+        """Initialize NIFTY option data from XTS instrument master (like Gold)"""
+        try:
+            self.nifty_option_fetcher = NiftyATMOptionFetcher()
+            if self.nifty_option_fetcher.initialize():
+                self.nifty_options_cache = self.nifty_option_fetcher.instrument_cache
+                self.nifty_expiry = self.nifty_option_fetcher.expiry
+                print(f"[OK] NIFTY options ready: {len(self.nifty_options_cache)} contracts, expiry={self.nifty_expiry}")
+                return True
+            else:
+                print("[WARNING] NIFTY option fetcher initialization failed - will use estimation fallback")
+                return False
+        except Exception as e:
+            print(f"[WARNING] NIFTY options init error: {e}")
+            return False
     
     def init_gold_options(self):
         """Initialize Gold option data from XTS instrument master"""
@@ -766,6 +927,9 @@ class TradingMainWindow(QMainWindow):
         # Load initial data
         self.load_initial_data()
         
+        # Clear premium cache on instrument switch
+        self._premium_cache.clear()
+        
         print(f"[INFO] Switched to {instrument_config['name']}")
         if instrument_name == 'NIFTY 50':
             print(f"[INFO] Trading NIFTY Options with real-time premiums")
@@ -788,7 +952,6 @@ class TradingMainWindow(QMainWindow):
         
         if not df.empty:
             self.current_price = df['Close'].iloc[-1].item()
-            print(f"Data updated: {len(df)} candles, Latest price: Rs.{self.current_price:.2f}")
             
             # Update chart
             self.update_chart_with_indicators()
@@ -811,19 +974,26 @@ class TradingMainWindow(QMainWindow):
             
             # Update chart
             self.chart.update_chart(df_with_indicators)
-            print(f"Chart updated with {len(df_with_indicators)} candles")
         except Exception as e:
             print(f"Error updating chart: {e}") 
             import traceback
             traceback.print_exc()
         
     def check_signals(self):
-        """Check for trading signals from ALL strategies"""
+        """Check for trading signals from ALL strategies.
+        
+        Only fetches option premium from XTS for strategies that actually have a signal,
+        and caches the result to avoid duplicate API calls for the same strike.
+        """
         if self.current_data is None or self.current_data.empty:
             return
         
         # Calculate ATR for option pricing volatility
         atr = self.calculate_atr()
+        
+        # Cache option data per (signal_type) to avoid duplicate XTS calls
+        # e.g., if 3 strategies all give CALL, we only fetch CE premium once
+        _option_data_cache = {}
         
         # Check all strategies, not just the current one
         for strategy_name, strategy in self.strategies.items():
@@ -834,35 +1004,36 @@ class TradingMainWindow(QMainWindow):
                 confidence = signal_info.get('confidence', 0)
                 reason = signal_info.get('reason', 'No reason provided')
                 
-                # For NIFTY options, fetch real option data
+                # For NIFTY options, fetch real option data from XTS instrument master
                 option_data = None
-                if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
-                    option_data = self.option_fetcher.get_option_data(
-                        signal_type=signal_type,
-                        spot_price=self.current_price,
-                        atr=atr
-                    )
-                    
-                    # Use option premium as entry price
-                    entry_price = option_data['premium']
-                    stop_loss = option_data['stop_loss']
-                    target = option_data['target']
-                    
-                    # Add option details to signal_info
-                    signal_info['entry_price'] = entry_price
-                    signal_info['stop_loss'] = stop_loss
-                    signal_info['target'] = target
-                    signal_info['strike'] = option_data['strike']
-                    signal_info['option_type'] = option_data['option_type']
-                    signal_info['spot_price'] = option_data['spot_price']
-                
-                # For GOLD options, fetch from MCX via instrument master
-                elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
-                    option_data = self.get_gold_option_data(
-                        signal_type=signal_type,
-                        spot_price=self.gold_spot_price,
-                        atr=atr
-                    )
+                if self.current_instrument == 'NIFTY 50':
+                    # Check if we already fetched this signal type's premium
+                    if signal_type in _option_data_cache:
+                        option_data = _option_data_cache[signal_type]
+                    else:
+                        if self.nifty_option_fetcher and self.nifty_options_cache:
+                            try:
+                                option_data = self.nifty_option_fetcher.get_option_data(
+                                    signal_type=signal_type,
+                                    spot_price=self.current_price,
+                                    atr=atr
+                                )
+                            except Exception as e:
+                                print(f"[WARNING] NIFTY option fetcher error: {e}")
+                                option_data = None
+                        
+                        if not option_data and self.option_fetcher:
+                            try:
+                                option_data = self.option_fetcher.get_option_data(
+                                    signal_type=signal_type,
+                                    spot_price=self.current_price,
+                                    atr=atr
+                                )
+                            except Exception as e:
+                                print(f"[WARNING] Old option fetcher error: {e}")
+                                option_data = None
+                        
+                        _option_data_cache[signal_type] = option_data
                     
                     if option_data:
                         entry_price = option_data['premium']
@@ -875,6 +1046,40 @@ class TradingMainWindow(QMainWindow):
                         signal_info['strike'] = option_data['strike']
                         signal_info['option_type'] = option_data['option_type']
                         signal_info['spot_price'] = option_data['spot_price']
+                        
+                        # Cache this premium for position updates too
+                        self._premium_cache[(option_data['strike'], option_data['option_type'])] = entry_price
+                    else:
+                        entry_price = signal_info.get('entry_price', self.current_price)
+                        stop_loss = signal_info.get('stop_loss', 0)
+                        target = signal_info.get('target', 0)
+                
+                # For GOLD options, fetch from MCX via instrument master
+                elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+                    if signal_type in _option_data_cache:
+                        option_data = _option_data_cache[signal_type]
+                    else:
+                        option_data = self.get_gold_option_data(
+                            signal_type=signal_type,
+                            spot_price=self.gold_spot_price,
+                            atr=atr
+                        )
+                        _option_data_cache[signal_type] = option_data
+                    
+                    if option_data:
+                        entry_price = option_data['premium']
+                        stop_loss = option_data['stop_loss']
+                        target = option_data['target']
+                        
+                        signal_info['entry_price'] = entry_price
+                        signal_info['stop_loss'] = stop_loss
+                        signal_info['target'] = target
+                        signal_info['strike'] = option_data['strike']
+                        signal_info['option_type'] = option_data['option_type']
+                        signal_info['spot_price'] = option_data['spot_price']
+                        
+                        # Cache this premium for position updates too
+                        self._premium_cache[(option_data['strike'], option_data['option_type'])] = entry_price
                     else:
                         entry_price = signal_info.get('entry_price', self.current_price)
                         stop_loss = signal_info.get('stop_loss', 0)
@@ -899,7 +1104,7 @@ class TradingMainWindow(QMainWindow):
                     
                     # Add option details for NIFTY / GOLD
                     if option_data:
-                        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 75)
+                        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 65)
                         instrument_name = 'NIFTY' if self.current_instrument == 'NIFTY 50' else self.current_instrument
                         details += f"""<b>Spot Price:</b> ₹{option_data['spot_price']:,.2f}<br>
 <b>Option:</b> {instrument_name} {option_data['strike']} {option_data['option_type']}<br>
@@ -974,6 +1179,50 @@ class TradingMainWindow(QMainWindow):
         signal_info = strategy.get_signal(self.current_data)
         
         if signal_info:
+            # Apply option data overlay for NIFTY/GOLD (same as check_signals does)
+            atr = self.calculate_atr()
+            signal_type = signal_info['signal']
+            
+            if self.current_instrument == 'NIFTY 50':
+                option_data = None
+                if self.nifty_option_fetcher and self.nifty_options_cache:
+                    option_data = self.nifty_option_fetcher.get_option_data(
+                        signal_type=signal_type,
+                        spot_price=self.current_price,
+                        atr=atr
+                    )
+                elif self.option_fetcher:
+                    option_data = self.option_fetcher.get_option_data(
+                        signal_type=signal_type,
+                        spot_price=self.current_price,
+                        atr=atr
+                    )
+                
+                if option_data:
+                    signal_info['entry_price'] = option_data['premium']
+                    signal_info['stop_loss'] = option_data['stop_loss']
+                    signal_info['target'] = option_data['target']
+                    signal_info['strike'] = option_data['strike']
+                    signal_info['option_type'] = option_data['option_type']
+                    signal_info['spot_price'] = option_data['spot_price']
+            
+            elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
+                option_data = self.get_gold_option_data(
+                    signal_type=signal_type,
+                    spot_price=self.gold_spot_price,
+                    atr=atr
+                )
+                if option_data:
+                    signal_info['entry_price'] = option_data['premium']
+                    signal_info['stop_loss'] = option_data['stop_loss']
+                    signal_info['target'] = option_data['target']
+                    signal_info['strike'] = option_data['strike']
+                    signal_info['option_type'] = option_data['option_type']
+                    signal_info['spot_price'] = option_data['spot_price']
+                    
+                    # Cache this premium for position updates
+                    self._premium_cache[(option_data['strike'], option_data['option_type'])] = option_data['premium']
+            
             self.execute_trade(signal_info)
     
     def execute_manual_exit(self):
@@ -1017,15 +1266,25 @@ class TradingMainWindow(QMainWindow):
         
         # Get current exit price (option premium for NIFTY/GOLD options, spot for others)
         exit_price = self.current_price
-        if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
+        if self.current_instrument == 'NIFTY 50':
             if hasattr(trade, 'strike') and trade.strike > 0 and hasattr(trade, 'option_type'):
                 atr = self.calculate_atr()
-                exit_price = self.option_fetcher.get_option_ltp(
-                    trade.strike,
-                    trade.option_type,
-                    self.current_price,
-                    atr
-                )
+                # Priority 1: Use instrument master fetcher (real prices)
+                if self.nifty_option_fetcher and self.nifty_options_cache:
+                    exit_price = self.nifty_option_fetcher.get_option_ltp(
+                        trade.strike,
+                        trade.option_type,
+                        self.current_price,
+                        atr
+                    )[0]  # get_option_ltp returns (price, source) tuple
+                # Priority 2: Fall back to old fetcher
+                elif self.option_fetcher:
+                    exit_price = self.option_fetcher.get_option_ltp(
+                        trade.strike,
+                        trade.option_type,
+                        self.current_price,
+                        atr
+                    )
         elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
             if hasattr(trade, 'strike') and trade.strike > 0 and hasattr(trade, 'option_type'):
                 exit_price = self.get_gold_option_ltp(
@@ -1035,9 +1294,14 @@ class TradingMainWindow(QMainWindow):
                 )
         
         # Calculate potential P&L
-        potential_pnl = (exit_price - trade.entry_price) * trade.quantity
-        if trade.signal_type == 'PUT':
-            potential_pnl = (trade.entry_price - exit_price) * trade.quantity
+        # For option trades (both CALL/PUT), we BUY the option - always long
+        if hasattr(trade, 'strike') and trade.strike > 0 and trade.option_type:
+            potential_pnl = (exit_price - trade.entry_price) * trade.quantity
+        else:
+            # Spot/futures trade - directional
+            potential_pnl = (exit_price - trade.entry_price) * trade.quantity
+            if trade.signal_type == 'PUT':
+                potential_pnl = (trade.entry_price - exit_price) * trade.quantity
         
         # Confirm exit
         reply = QMessageBox.question(
@@ -1071,6 +1335,8 @@ class TradingMainWindow(QMainWindow):
             strategy_name = self.current_strategy
         
         print(f"[EXECUTE_TRADE] Strategy: {strategy_name}, Signal: {signal_info['signal']}")
+        print(f"[EXECUTE_TRADE] signal_info keys: {list(signal_info.keys())}")
+        print(f"[EXECUTE_TRADE] strike={signal_info.get('strike', 'MISSING')}, option_type={signal_info.get('option_type', 'MISSING')}, entry_price={signal_info.get('entry_price', 'MISSING')}")
         
         # Get the trading engine for current instrument and strategy
         engine_key = f"{self.current_instrument}_{strategy_name}"
@@ -1084,8 +1350,32 @@ class TradingMainWindow(QMainWindow):
         spot_price = signal_info.get('spot_price', self.current_price)
         entry_price = signal_info.get('entry_price', self.current_price)
         
+        # Safety check: For option trades, entry_price should be the option premium, not spot price
+        # NIFTY premiums are typically 50-500, spot is ~25000. GOLD premiums are ~1000-5000, spot is ~85000
+        if strike > 0 and option_type:
+            is_suspicious = False
+            if self.current_instrument == 'NIFTY 50' and entry_price > 1000:
+                is_suspicious = True  # NIFTY premium > 1000 likely means spot leaked in
+            elif self.current_instrument == 'GOLD' and entry_price > 20000:
+                is_suspicious = True  # GOLD premium > 20000 likely means spot leaked in
+            
+            if is_suspicious:
+                print(f"[WARNING] Entry price {entry_price:.2f} looks like spot price, not option premium!")
+                print(f"[WARNING] Re-fetching option premium for {strike} {option_type}...")
+                atr = self.calculate_atr()
+                if self.current_instrument == 'NIFTY 50':
+                    if self.nifty_option_fetcher and self.nifty_options_cache:
+                        entry_price = self.nifty_option_fetcher.get_option_ltp(strike, option_type, self.current_price, atr)[0]
+                    elif self.option_fetcher:
+                        entry_price = self.option_fetcher.get_option_ltp(strike, option_type, self.current_price, atr)
+                elif self.current_instrument == 'GOLD':
+                    entry_price = self.get_gold_option_ltp(strike, option_type, self.gold_spot_price, atr)
+                signal_info['stop_loss'] = entry_price * 0.70  # 30% loss
+                signal_info['target'] = entry_price * 1.50     # 50% profit
+                print(f"[FIXED] Using premium: {entry_price:.2f}, SL: {signal_info['stop_loss']:.2f}, Target: {signal_info['target']:.2f}")
+        
         # Get instrument-specific lot size
-        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 75)
+        lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 65)
         instrument_prefix = 'NIFTY' if self.current_instrument == 'NIFTY 50' else self.current_instrument
         
         # Execute trade with all option parameters
@@ -1241,62 +1531,81 @@ class TradingMainWindow(QMainWindow):
         dialog.setStandardButtons(QMessageBox.Ok)
         dialog.exec_()
     
-    def update_ui(self):
-        """Update UI elements periodically"""
-        # Refresh Gold spot price from XTS if GOLD selected
-        if self.current_instrument == 'GOLD' and self.gold_option_fetcher and self.gold_future_id:
-            try:
-                quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
-                if quote:
-                    spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
-                    if spot > 0:
-                        self.gold_spot_price = spot
-            except Exception:
-                pass
+    def _on_premiums_updated(self, premiums):
+        """Called by background thread when fresh premiums are available"""
+        self._premium_cache.update(premiums)
+        self._premium_cache_time = datetime.now()
+    
+    def _on_gold_spot_updated(self, spot_price):
+        """Called by background thread when Gold spot price is updated"""
+        self.gold_spot_price = spot_price
+    
+    def _sync_positions_to_premium_thread(self):
+        """Tell the background thread which positions need premium updates"""
+        positions = []
+        for strategy_name in self.strategies.keys():
+            engine_key = f"{self.current_instrument}_{strategy_name}"
+            engine = self.trading_engines.get(engine_key)
+            if engine:
+                for pos in engine.open_positions:
+                    if hasattr(pos, 'strike') and pos.strike > 0 and hasattr(pos, 'option_type'):
+                        key = (pos.strike, pos.option_type)
+                        if key not in positions:
+                            positions.append(key)
         
+        self.premium_thread.set_positions(
+            positions,
+            self.current_instrument,
+            self.current_price,
+            self.calculate_atr()
+        )
+    
+    def update_ui(self):
+        """Update UI elements periodically - NO API calls, reads from cache only"""
         # Update price display
         if self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
             self.price_label.setText(f"MCX Gold: ₹{self.gold_spot_price:,.1f}")
         elif self.current_price > 0:
             self.price_label.setText(f"Price: ₹{self.current_price:.2f}")
         
-        # Update positions for all strategies of current instrument with current price
-        if self.current_price > 0:
-            atr = self.calculate_atr()
-            
+        # Tell background thread which positions to fetch premiums for
+        self._sync_positions_to_premium_thread()
+        
+        # Update positions using CACHED premiums (no API calls here)
+        price_available = self.current_price > 0 or (self.current_instrument == 'GOLD' and self.gold_spot_price > 0)
+        if price_available:
             for strategy_name in self.strategies.keys():
                 engine_key = f"{self.current_instrument}_{strategy_name}"
                 engine = self.trading_engines.get(engine_key)
                 if engine:
-                    # For NIFTY options, update with current option premium
-                    if self.current_instrument == 'NIFTY 50' and self.option_fetcher:
-                        # Update each open position with its current option premium
+                    if self.current_instrument in ('NIFTY 50', 'GOLD'):
+                        # Update each position individually with its own premium
+                        positions_to_close = []
                         for position in engine.open_positions:
-                            if hasattr(position, 'strike') and hasattr(position, 'option_type') and position.strike > 0:
-                                current_premium = self.option_fetcher.get_option_ltp(
-                                    position.strike,
-                                    position.option_type,
-                                    self.current_price,
-                                    atr
-                                )
-                                engine.update_positions(current_premium)
+                            if hasattr(position, 'strike') and position.strike > 0 and hasattr(position, 'option_type'):
+                                key = (position.strike, position.option_type)
+                                cached_premium = self._premium_cache.get(key)
+                                if cached_premium and cached_premium > 0:
+                                    # Update THIS position only (not all positions)
+                                    position.update_current_price(cached_premium)
+                                    if position.check_exit_conditions(cached_premium):
+                                        positions_to_close.append(position)
+                                # else: skip update until background thread fetches it
                             else:
-                                engine.update_positions(self.current_price)
-                    
-                    # For GOLD options, update with current MCX option premium
-                    elif self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
-                        for position in engine.open_positions:
-                            if hasattr(position, 'strike') and hasattr(position, 'option_type') and position.strike > 0:
-                                current_premium = self.get_gold_option_ltp(
-                                    position.strike,
-                                    position.option_type,
-                                    self.gold_spot_price
-                                )
-                                engine.update_positions(current_premium)
-                            else:
-                                engine.update_positions(self.gold_spot_price)
+                                price = self.gold_spot_price if self.current_instrument == 'GOLD' else self.current_price
+                                if price > 0:
+                                    position.update_current_price(price)
+                                    if position.check_exit_conditions(price):
+                                        positions_to_close.append(position)
+                        
+                        # Close positions that hit SL or target
+                        for trade in positions_to_close:
+                            margin = trade.entry_price * trade.quantity * 0.20
+                            engine.capital += margin + trade.pnl
+                            engine.open_positions.remove(trade)
+                            engine.closed_trades.append(trade)
+                            print(f"✓ Auto-closed: {trade.trade_id} - {trade.status} - P&L: ₹{trade.pnl:,.2f}")
                     else:
-                        # For other instruments, use spot price
                         engine.update_positions(self.current_price)
                     
                     # Update trade table if any position closed
@@ -1557,6 +1866,13 @@ class TradingMainWindow(QMainWindow):
         # Stop timers first
         if hasattr(self, 'ui_timer'):
             self.ui_timer.stop()
+        
+        # Stop premium update thread
+        if hasattr(self, 'premium_thread'):
+            print("Stopping premium thread...")
+            self.premium_thread.stop()
+            self.premium_thread.quit()
+            self.premium_thread.wait(2000)
         
         # Stop data thread
         if hasattr(self, 'data_thread'):

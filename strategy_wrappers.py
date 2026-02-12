@@ -119,7 +119,7 @@ class BollingerMACDStrategy:
         
         signal_info = None
         
-        print(f"[SIGNAL CHECK] Close: {close_val:.2f}, BB: [{bb_lower:.2f}, {bb_upper:.2f}], RSI: {rsi_val:.1f}, MACD: {macd_val:.2f}/{macd_sig:.2f}")
+        # print(f"[SIGNAL CHECK] Close: {close_val:.2f}, BB: [{bb_lower:.2f}, {bb_upper:.2f}], RSI: {rsi_val:.1f}, MACD: {macd_val:.2f}/{macd_sig:.2f}")
         
         # CALL signal
         if (close_val > bb_upper and macd_val > macd_sig and 50 <= rsi_val <= 85):
@@ -136,7 +136,7 @@ class BollingerMACDStrategy:
                 'reason': f'Bullish Breakout - RSI: {rsi_val:.1f}, MACD Bullish',
                 'atr': atr_val
             }
-            print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         
         # PUT signal
         elif (close_val < bb_lower and macd_val < macd_sig and 15 <= rsi_val <= 50):
@@ -153,9 +153,10 @@ class BollingerMACDStrategy:
                 'reason': f'Bearish Breakout - RSI: {rsi_val:.1f}, MACD Bearish',
                 'atr': atr_val
             }
-            print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         else:
-            print("[WAITING] No signal - Conditions not met")
+            # print("[WAITING] No signal - Conditions not met")
+            pass
         
         return signal_info
     
@@ -251,7 +252,7 @@ class OpeningRangeBreakoutStrategy:
         
         signal_info = None
         
-        print(f"[SIGNAL CHECK] Close: {close_val:.2f}, Range: [{opening_range_low:.2f}, {opening_range_high:.2f}], Vol: {vol_val:.0f}/{avg_vol:.0f}")
+        # print(f"[SIGNAL CHECK] Close: {close_val:.2f}, Range: [{opening_range_low:.2f}, {opening_range_high:.2f}], Vol: {vol_val:.0f}/{avg_vol:.0f}")
         
         # Bullish breakout
         if close_val > opening_range_high:
@@ -268,7 +269,7 @@ class OpeningRangeBreakoutStrategy:
                 'reason': f'Breakout above opening range high ({opening_range_high:.2f})',
                 'atr': 50.0  # Default ATR estimate
             }
-            print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         
         # Bearish breakdown
         elif close_val < opening_range_low:
@@ -285,9 +286,10 @@ class OpeningRangeBreakoutStrategy:
                 'reason': f'Breakdown below opening range low ({opening_range_low:.2f})',
                 'atr': 50.0  # Default ATR estimate
             }
-            print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         else:
-            print("[WAITING] No signal - Price within range")
+            # print("[WAITING] No signal - Price within range")
+            pass
         
         return signal_info
     
@@ -421,7 +423,7 @@ class SidewaysStrategy:
         
         # Only trade in sideways market
         if adx_val >= 25:
-            print(f"[SIDEWAYS] Not sideways - ADX {adx_val:.1f} >= 25")
+            # print(f"[SIDEWAYS] Not sideways - ADX {adx_val:.1f} >= 25")
             return None
         
         # Volume check
@@ -431,7 +433,7 @@ class SidewaysStrategy:
         
         signal_info = None
         
-        print(f"[SIGNAL CHECK] Close: {close_val:.2f}, Range: [{support:.2f}, {resistance:.2f}], ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}")
+        # print(f"[SIGNAL CHECK] Close: {close_val:.2f}, Range: [{support:.2f}, {resistance:.2f}], ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}")
         
         # SHORT at resistance
         if close_val >= resistance * 0.985 and rsi_val > 55:  # Within 1.5% of resistance
@@ -447,7 +449,7 @@ class SidewaysStrategy:
                 'confidence': min(1.0, (rsi_val - 55) / 30),
                 'reason': f'Sideways market - Short at resistance. ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}'
             }
-            print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         
         # LONG at support (optional - less reliable)
         elif close_val <= support * 1.015 and rsi_val < 45:  # Within 1.5% of support
@@ -464,9 +466,10 @@ class SidewaysStrategy:
                 'reason': f'Sideways market - Long at support. ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}',
                 'atr': atr_val
             }
-            print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         else:
-            print("[WAITING] No signal - Not at support/resistance")
+            # print("[WAITING] No signal - Not at support/resistance")
+            pass
         
         return signal_info
     
@@ -555,7 +558,7 @@ class MomentumBreakoutStrategy:
         # Volume confirmation
         strong_volume = volume > volume_ma * 1.2
         
-        print(f"[MOMENTUM] Close: {close:.2f}, EMA Fast: {ema_fast:.2f}, Slow: {ema_slow:.2f}, RSI: {rsi:.1f}, Vol: {volume:.0f}/{volume_ma:.0f}")
+        # print(f"[MOMENTUM] Close: {close:.2f}, EMA Fast: {ema_fast:.2f}, Slow: {ema_slow:.2f}, RSI: {rsi:.1f}, Vol: {volume:.0f}/{volume_ma:.0f}")
         
         # CALL Signal: Bullish crossover with momentum
         if bullish_cross and rsi > 50 and close > ema_trend and strong_volume:
@@ -572,7 +575,7 @@ class MomentumBreakoutStrategy:
                 'reason': f'Momentum breakout - EMA cross bullish, RSI: {rsi:.1f}',
                 'atr': atr
             }
-            print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         
         # PUT Signal: Bearish crossover with momentum
         elif bearish_cross and rsi < 50 and close < ema_trend and strong_volume:
@@ -589,9 +592,10 @@ class MomentumBreakoutStrategy:
                 'reason': f'Momentum breakdown - EMA cross bearish, RSI: {rsi:.1f}',
                 'atr': atr
             }
-            print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         else:
-            print("[WAITING] No momentum signal")
+            # print("[WAITING] No momentum signal")
+            pass
         
         return signal_info
     
@@ -688,7 +692,7 @@ class MeanReversionStrategy:
         dist_to_support = close - support
         dist_to_resistance = resistance - close
         
-        print(f"[MEAN REV] Close: {close:.2f}, RSI: {rsi:.1f}, BB: [{bb_lower:.2f}, {bb_upper:.2f}], S/R: [{support:.2f}, {resistance:.2f}]")
+        # print(f"[MEAN REV] Close: {close:.2f}, RSI: {rsi:.1f}, BB: [{bb_lower:.2f}, {bb_upper:.2f}], S/R: [{support:.2f}, {resistance:.2f}]")
         
         # CALL Signal: Oversold near support
         if rsi < 30 and close < bb_lower and dist_to_support < (atr * 0.5):
@@ -705,7 +709,7 @@ class MeanReversionStrategy:
                 'reason': f'Oversold bounce - RSI: {rsi:.1f}, near support',
                 'atr': atr
             }
-            print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[CALL SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         
         # PUT Signal: Overbought near resistance
         elif rsi > 70 and close > bb_upper and dist_to_resistance < (atr * 0.5):
@@ -722,9 +726,10 @@ class MeanReversionStrategy:
                 'reason': f'Overbought reversal - RSI: {rsi:.1f}, near resistance',
                 'atr': atr
             }
-            print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
+            # print(f"[PUT SIGNAL] Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}")
         else:
-            print("[WAITING] No mean reversion signal")
+            # print("[WAITING] No mean reversion signal")
+            pass
         
         return signal_info
     
@@ -805,7 +810,7 @@ class EMACrossoverStrategy:
         
         signal_info = None
         
-        print(f"[EMA CROSSOVER] Close: {close:.2f}, EMA9: {ema9_current:.2f}, EMA21: {ema21_current:.2f}, ATR: {atr:.2f}")
+        # print(f"[EMA CROSSOVER] Close: {close:.2f}, EMA9: {ema9_current:.2f}, EMA21: {ema21_current:.2f}, ATR: {atr:.2f}")
         
         # Detect bullish crossover (9 EMA crosses above 21 EMA)
         if ema9_prev <= ema21_prev and ema9_current > ema21_current:
@@ -823,7 +828,7 @@ class EMACrossoverStrategy:
                 'reason': f'Bullish EMA Crossover - 9 EMA crossed above 21 EMA',
                 'atr': atr
             }
-            print(f"[CALL SIGNAL] Bullish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
+            # print(f"[CALL SIGNAL] Bullish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
         
         # Detect bearish crossover (9 EMA crosses below 21 EMA)
         elif ema9_prev >= ema21_prev and ema9_current < ema21_current:
@@ -841,13 +846,15 @@ class EMACrossoverStrategy:
                 'reason': f'Bearish EMA Crossover - 9 EMA crossed below 21 EMA',
                 'atr': atr
             }
-            print(f"[PUT SIGNAL] Bearish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
+            # print(f"[PUT SIGNAL] Bearish Crossover - Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Target: {target:.2f}, R/R: 1:3")
         else:
             # No crossover detected
             if ema9_current > ema21_current:
-                print(f"[WAITING] 9 EMA above 21 EMA (bullish trend) - waiting for crossover")
+                # print(f"[WAITING] 9 EMA above 21 EMA (bullish trend) - waiting for crossover")
+                pass
             else:
-                print(f"[WAITING] 9 EMA below 21 EMA (bearish trend) - waiting for crossover")
+                # print(f"[WAITING] 9 EMA below 21 EMA (bearish trend) - waiting for crossover")
+                pass
         
         return signal_info
     

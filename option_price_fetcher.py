@@ -385,7 +385,9 @@ class OptionPriceFetcher:
         
         # Adjust based on volatility (ATR)
         # Higher ATR = Higher premiums
-        volatility_multiplier = max(0.5, (atr / 50) * 1.2)  # Normalized to ATR=50 baseline
+        # Note: 5-min candle ATR is much smaller than daily ATR
+        # Minimum multiplier of 1.0 ensures base premium is not reduced below market reality
+        volatility_multiplier = max(1.0, (atr / 50) * 1.2)  # Normalized to ATR=50 baseline
         
         # Calculate time value based on moneyness
         if distance_from_atm <= 50:  # ATM or very close (within 1 strike)
@@ -495,14 +497,14 @@ if __name__ == "__main__":
     
     print("CALL OPTIONS (CE):")
     print("-"*70)
-    print(f"{'Strike':<10} {'Premium':<12} {'Intrinsic':<12} {'Time Value':<12} {'Cost (75 qty)'}")
+    print(f"{'Strike':<10} {'Premium':<12} {'Intrinsic':<12} {'Time Value':<12} {'Cost (65 qty)'}")
     print("-"*70)
     
     for strike in strikes:
         ce_price = fetcher.get_option_ltp(strike, 'CE', spot, atr)
         intrinsic = max(0, spot - strike)
         time_val = ce_price - intrinsic
-        cost = ce_price * 75
+        cost = ce_price * 65
         
         status = "ITM" if spot > strike else "ATM" if spot == strike else "OTM"
         print(f"{strike:<10} Rs.{ce_price:<9.2f} Rs.{intrinsic:<9.2f} Rs.{time_val:<9.2f} Rs.{cost:>10,.2f}  [{status}]")
@@ -510,14 +512,14 @@ if __name__ == "__main__":
     print()
     print("PUT OPTIONS (PE):")
     print("-"*70)
-    print(f"{'Strike':<10} {'Premium':<12} {'Intrinsic':<12} {'Time Value':<12} {'Cost (75 qty)'}")
+    print(f"{'Strike':<10} {'Premium':<12} {'Intrinsic':<12} {'Time Value':<12} {'Cost (65 qty)'}")
     print("-"*70)
     
     for strike in strikes:
         pe_price = fetcher.get_option_ltp(strike, 'PE', spot, atr)
         intrinsic = max(0, strike - spot)
         time_val = pe_price - intrinsic
-        cost = pe_price * 75
+        cost = pe_price * 65
         
         status = "ITM" if spot < strike else "ATM" if spot == strike else "OTM"
         print(f"{strike:<10} Rs.{pe_price:<9.2f} Rs.{intrinsic:<9.2f} Rs.{time_val:<9.2f} Rs.{cost:>10,.2f}  [{status}]")
@@ -529,5 +531,5 @@ if __name__ == "__main__":
     ce = fetcher.get_option_ltp(atm_strike, 'CE', spot, atr)
     pe = fetcher.get_option_ltp(atm_strike, 'PE', spot, atr)
     print(f"Strike: {atm_strike}")
-    print(f"CE Premium: Rs.{ce:.2f} | Total Cost: Rs.{ce*75:,.2f}")
-    print(f"PE Premium: Rs.{pe:.2f} | Total Cost: Rs.{pe*75:,.2f}")
+    print(f"CE Premium: Rs.{ce:.2f} | Total Cost: Rs.{ce*65:,.2f}")
+    print(f"PE Premium: Rs.{pe:.2f} | Total Cost: Rs.{pe*65:,.2f}")

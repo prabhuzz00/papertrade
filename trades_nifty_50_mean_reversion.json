@@ -1,7 +1,46 @@
 {
   "initial_capital": 1000000,
-  "current_capital": 1000000,
+  "current_capital": 1011939.2,
   "open_positions": [],
-  "closed_trades": [],
-  "trade_counter": 0
+  "closed_trades": [
+    {
+      "trade_id": "MEA-0001",
+      "signal_type": "PUT",
+      "entry_price": 96.75,
+      "entry_time": "2026-02-11T13:42:46.720333",
+      "quantity": 65,
+      "stop_loss": 67.725,
+      "target": 145.125,
+      "strategy": "Mean Reversion",
+      "notes": "Overbought reversal - RSI: 70.0, near resistance",
+      "strike": 25950,
+      "option_type": "PE",
+      "spot_price": 25967.0,
+      "exit_price": 113.6,
+      "exit_time": "2026-02-11T14:00:17.176695",
+      "status": "MANUAL_EXIT",
+      "pnl": 1095.2499999999995,
+      "current_price": 113.6
+    },
+    {
+      "trade_id": "MEA-0002",
+      "signal_type": "PUT",
+      "entry_price": 101.85,
+      "entry_time": "2026-02-11T15:00:28.332076",
+      "quantity": 65,
+      "stop_loss": 71.29499999999999,
+      "target": 152.77499999999998,
+      "strategy": "Mean Reversion",
+      "notes": "Overbought reversal - RSI: 70.8, near resistance",
+      "strike": 25950,
+      "option_type": "PE",
+      "spot_price": 25967.849609375,
+      "exit_price": 109.8,
+      "exit_time": "2026-02-11T15:03:33.269037",
+      "status": "MANUAL_EXIT",
+      "pnl": 516.7500000000002,
+      "current_price": 109.8
+    }
+  ],
+  "trade_counter": 2
 }

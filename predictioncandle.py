@@ -88,7 +88,7 @@ RISK MANAGEMENT:
 
 Stop Loss: ATR (varies with market volatility)
 Take Profit: 1.5x to 2x the Stop Loss (1:1.5 to 1:2 risk/reward)
-Position Size: 1 NIFTY 50 lot = 75 shares = 1 unit
+Position Size: 1 NIFTY 50 lot = 65 shares = 1 unit
 Risk per Trade: 2% of capital maximum
 Max Leverage: 1 lot at Rs 30,000 margin
 
@@ -705,7 +705,7 @@ if total_trades > 0:
     
     # Calculate based on backtested results
     avg_stop_loss_pts = 15  # Based on ATR average from backtest
-    per_lot_stop_loss = avg_stop_loss_pts * 75
+    per_lot_stop_loss = avg_stop_loss_pts * 65
     
     # Optimal lot size: 1 lot per signal (conservative)
     optimal_lots = 1
@@ -767,7 +767,7 @@ if total_trades > 0:
     # Drawdown analysis
     max_consecutive_losses = max(1, total_losses)  # From backtest analysis
     avg_loss = (total_loss_amount/total_losses) if total_losses > 0 else 0
-    max_drawdown = (max_consecutive_losses * avg_loss * 75)
+    max_drawdown = (max_consecutive_losses * avg_loss * 65)
     drawdown_percent = (max_drawdown / capital) * 100 if max_drawdown > 0 else 0
     
     print(f"📉 RISK EXPOSURE")

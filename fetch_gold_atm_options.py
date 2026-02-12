@@ -24,6 +24,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class GoldATMOptionFetcher:
     """Fetch Gold ATM option prices using instrument master for numeric IDs"""
     
+    TOKEN_REFRESH_INTERVAL = 180  # 3 minutes
+    
     def __init__(self):
         self.token = None
         self.base_url = XTS_BASE_URL
@@ -31,6 +33,7 @@ class GoldATMOptionFetcher:
         self.secret_key = XTS_SECRET_KEY
         self.source = XTS_SOURCE
         self.instrument_cache = {}  # {(strike, 'CE'/'PE'): instrument_info}
+        self._login_time = None
     
     def login(self):
         """Login to XTS API"""
@@ -52,15 +55,26 @@ class GoldATMOptionFetcher:
                 data = response.json()
                 self.token = data.get('result', {}).get('token')
                 if self.token:
-                    print(f"✓ Login successful")
+                    self._login_time = datetime.now()
+                    print(f"✓ Gold API Login successful")
                     return True
             
-            print(f"✗ Login failed: {response.text}")
+            print(f"✗ Gold API Login failed: {response.text}")
             return False
         
         except Exception as e:
             print(f"✗ Login error: {e}")
             return False
+    
+    def _ensure_token(self):
+        """Ensure token is fresh - re-login if older than TOKEN_REFRESH_INTERVAL seconds"""
+        if not self.token or not self._login_time:
+            return self.login()
+        
+        elapsed = (datetime.now() - self._login_time).total_seconds()
+        if elapsed > self.TOKEN_REFRESH_INTERVAL:
+            return self.login()
+        return True
     
     def download_mcxfo_master(self):
         """
@@ -211,17 +225,21 @@ class GoldATMOptionFetcher:
         futures.sort(key=lambda x: x.get('expiry', ''))
         return futures
     
-    def get_quote(self, instrument_id, segment=51):
+    def get_quote(self, instrument_id, segment=51, _retried=False):
         """
         Fetch real-time quote for an instrument using quotes endpoint.
+        Auto-retries on auth failure with fresh token.
         
         Args:
             instrument_id: Numeric ExchangeInstrumentID from master
             segment: Exchange segment (51=MCXFO)
+            _retried: Internal flag to prevent infinite retry loops
             
         Returns:
             Dict with ltp, close, open, high, low, volume, bid, ask or None
         """
+        self._ensure_token()
+        
         if not self.token:
             return None
         
@@ -242,8 +260,19 @@ class GoldATMOptionFetcher:
         
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=10, verify=False)
+            
+            # Auth failure: retry with fresh token
+            if response.status_code in (401, 403) and not _retried:
+                self.login()
+                return self.get_quote(instrument_id, segment, _retried=True)
+            
             if response.status_code == 200:
                 data = response.json()
+                
+                # Check for API-level auth errors in body
+                if data.get('type') == 'error' and not _retried:
+                    self.login()
+                    return self.get_quote(instrument_id, segment, _retried=True)
                 
                 if 'result' in data and 'listQuotes' in data['result']:
                     quotes = data['result']['listQuotes']
@@ -256,9 +285,17 @@ class GoldATMOptionFetcher:
                         bid_info = touchline.get('BidInfo', {})
                         ask_info = touchline.get('AskInfo', {})
                         
+                        ltp = touchline.get('LastTradedPrice', 0)
+                        close = touchline.get('Close', 0)
+                        
+                        # If both LTP and close are 0, retry once
+                        if ltp == 0 and close == 0 and not _retried:
+                            self.login()
+                            return self.get_quote(instrument_id, segment, _retried=True)
+                        
                         return {
-                            'ltp': touchline.get('LastTradedPrice', 0),
-                            'close': touchline.get('Close', 0),
+                            'ltp': ltp,
+                            'close': close,
                             'open': touchline.get('Open', 0),
                             'high': touchline.get('High', 0),
                             'low': touchline.get('Low', 0),
@@ -267,9 +304,16 @@ class GoldATMOptionFetcher:
                             'ask': ask_info.get('Price', 0) if isinstance(ask_info, dict) else 0,
                         }
             
+            # Non-200 status: retry once
+            if not _retried:
+                self.login()
+                return self.get_quote(instrument_id, segment, _retried=True)
+            
             return None
         except Exception as e:
-            print(f"  Error fetching quote: {e}")
+            if not _retried:
+                self.login()
+                return self.get_quote(instrument_id, segment, _retried=True)
             return None
     
     def get_gold_spot_price(self, master_lines, symbol="GOLD"):
