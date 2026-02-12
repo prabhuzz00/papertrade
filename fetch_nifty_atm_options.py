@@ -418,6 +418,8 @@ class NiftyATMOptionFetcher:
         premium, source = self.get_option_ltp(atm_strike, option_type, spot_price, atr)
         
         # SL: 30% loss, Target: 50% profit (based on premium)
+        # NOTE: These are default values; the trading app overrides them
+        # with user-configured target points from the UI
         stop_loss = premium * 0.70
         target = premium * 1.50
         

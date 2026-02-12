@@ -1,0 +1,53 @@
+{
+  "initial_capital": 1000000,
+  "current_capital": 912770.0,
+  "open_positions": [
+    {
+      "trade_id": "ORD-0001",
+      "signal_type": "PUT",
+      "entry_price": 4049,
+      "entry_time": "2026-02-12T18:07:17.258007",
+      "quantity": 100,
+      "stop_loss": 3999.0,
+      "target": 4149,
+      "strategy": "Order Block",
+      "notes": "Bearish OB resistance [5084-5087], move=6 pts, age=22 candles",
+      "strike": 158000,
+      "option_type": "PE",
+      "spot_price": 157902.0,
+      "exit_price": null,
+      "exit_time": null,
+      "status": "OPEN",
+      "pnl": 0,
+      "current_price": 4049,
+      "initial_stop_loss": 3999.0,
+      "target_points": 100,
+      "trailing_sl_stage": "INITIAL"
+    }
+  ],
+  "closed_trades": [
+    {
+      "trade_id": "ORD-0002",
+      "signal_type": "CALL",
+      "entry_price": 4256,
+      "entry_time": "2026-02-12T18:12:38.449705",
+      "quantity": 100,
+      "stop_loss": 4206.0,
+      "target": 4356,
+      "strategy": "Order Block",
+      "notes": "Bullish OB support [5084-5084], move=3 pts, age=6 candles",
+      "strike": 158000,
+      "option_type": "CE",
+      "spot_price": 157752.0,
+      "exit_price": 4193.5,
+      "exit_time": "2026-02-12T18:13:31.512085",
+      "status": "STOP_LOSS",
+      "pnl": -6250.0,
+      "current_price": 4193.5,
+      "initial_stop_loss": 4206.0,
+      "target_points": 100,
+      "trailing_sl_stage": "INITIAL"
+    }
+  ],
+  "trade_counter": 2
+}

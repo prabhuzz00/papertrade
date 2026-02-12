@@ -1,0 +1,52 @@
+{
+  "initial_capital": 1000000,
+  "current_capital": 999700.0,
+  "open_positions": [],
+  "closed_trades": [
+    {
+      "trade_id": "MAR-0001",
+      "signal_type": "CALL",
+      "entry_price": 125,
+      "entry_time": "2026-02-12T17:38:06.190178",
+      "quantity": 100,
+      "stop_loss": 126,
+      "target": 135,
+      "strategy": "Market Structure Shift",
+      "notes": "Bullish MSS \u2014 Downtrend swing highs ['65', '65', '65'], broke 65 at 65",
+      "strike": 5850,
+      "option_type": "CE",
+      "spot_price": 5850.0,
+      "exit_price": 126,
+      "exit_time": "2026-02-12T17:47:08.065420",
+      "status": "STOP_LOSS",
+      "pnl": 100,
+      "current_price": 126,
+      "initial_stop_loss": 120.0,
+      "target_points": 10,
+      "trailing_sl_stage": "STAGE_50"
+    },
+    {
+      "trade_id": "MAR-0002",
+      "signal_type": "CALL",
+      "entry_price": 119,
+      "entry_time": "2026-02-12T18:59:07.376066",
+      "quantity": 100,
+      "stop_loss": 115.5,
+      "target": 126,
+      "strategy": "Market Structure Shift",
+      "notes": "Bullish MSS \u2014 Downtrend swing highs ['65', '65', '65'], broke 65 at 65",
+      "strike": 5850,
+      "option_type": "CE",
+      "spot_price": 5842.0,
+      "exit_price": 115,
+      "exit_time": "2026-02-12T19:03:05.383483",
+      "status": "STOP_LOSS",
+      "pnl": -400,
+      "current_price": 115,
+      "initial_stop_loss": 115.5,
+      "target_points": 7,
+      "trailing_sl_stage": "INITIAL"
+    }
+  ],
+  "trade_counter": 2
+}

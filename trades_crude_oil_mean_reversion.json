@@ -1,7 +1,30 @@
 {
   "initial_capital": 1000000,
-  "current_capital": 1000000,
+  "current_capital": 999220.0,
   "open_positions": [],
-  "closed_trades": [],
-  "trade_counter": 0
+  "closed_trades": [
+    {
+      "trade_id": "MEA-0001",
+      "signal_type": "CALL",
+      "entry_price": 126.5,
+      "entry_time": "2026-02-12T17:29:18.655117",
+      "quantity": 100,
+      "stop_loss": 121.5,
+      "target": 136.5,
+      "strategy": "Mean Reversion",
+      "notes": "Oversold bounce - RSI: 16.1, near support",
+      "strike": 5850,
+      "option_type": "CE",
+      "spot_price": 5854.0,
+      "exit_price": 118.7,
+      "exit_time": "2026-02-12T18:32:28.308421",
+      "status": "STOP_LOSS",
+      "pnl": -779.9999999999998,
+      "current_price": 118.7,
+      "initial_stop_loss": 121.5,
+      "target_points": 10,
+      "trailing_sl_stage": "INITIAL"
+    }
+  ],
+  "trade_counter": 1
 }

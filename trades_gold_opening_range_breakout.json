@@ -20,7 +20,10 @@
       "exit_time": "2026-02-11T18:28:40.688207",
       "status": "MANUAL_EXIT",
       "pnl": -57200,
-      "current_price": 4459
+      "current_price": 4459,
+      "initial_stop_loss": 3521.7,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
     }
   ],
   "trade_counter": 1

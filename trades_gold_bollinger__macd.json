@@ -20,7 +20,10 @@
       "exit_time": "2026-02-11T16:46:50.446131",
       "status": "MANUAL_EXIT",
       "pnl": 62240.00000000001,
-      "current_price": 4588
+      "current_price": 4588,
+      "initial_stop_loss": 2775.9199999999996,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
     },
     {
       "trade_id": "BOL-0002",
@@ -39,7 +42,10 @@
       "exit_time": "2026-02-11T18:28:34.368381",
       "status": "MANUAL_EXIT",
       "pnl": -67400,
-      "current_price": 4459
+      "current_price": 4459,
+      "initial_stop_loss": 3593.1,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
     }
   ],
   "trade_counter": 2

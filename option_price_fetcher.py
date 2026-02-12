@@ -465,10 +465,10 @@ class OptionPriceFetcher:
         premium = self.get_option_ltp(atm_strike, option_type, spot_price, atr)
         
         # Calculate stop loss and target for options (based on premium)
-        # SL: 30% loss from entry premium
-        # Target: 50% profit from entry premium
-        stop_loss = premium * 0.70  # 30% loss
-        target = premium * 1.50     # 50% profit
+        # NOTE: These are default values; the trading app overrides them
+        # with user-configured target points from the UI
+        stop_loss = premium * 0.70  # 30% loss (default, overridden by app)
+        target = premium * 1.50     # 50% profit (default, overridden by app)
         
         return {
             'strike': atm_strike,

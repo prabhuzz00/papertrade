@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #ffffff; overflow: hidden; }
+  #chart { width: 100%%; height: 100vh; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script src="_lw_charts.js"></script>
+<script>
+  const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: {
+      background: { type: 'solid', color: '#ffffff' },
+      textColor: '#333333',
+    },
+    grid: {
+      vertLines: { color: '#e1e3e6' },
+      horzLines: { color: '#e1e3e6' },
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+    },
+    rightPriceScale: {
+      borderColor: '#cccccc',
+    },
+    timeScale: {
+      borderColor: '#cccccc',
+      timeVisible: true,
+      secondsVisible: false,
+    },
+    localization: {
+      locale: 'en-IN',
+    },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#26a69a',
+    downColor: '#ef5350',
+    borderDownColor: '#ef5350',
+    borderUpColor: '#26a69a',
+    wickDownColor: '#ef5350',
+    wickUpColor: '#26a69a',
+  });
+
+  // Indicator line series (created on demand)
+  let bbUpper = null, bbLower = null, bbMiddle = null;
+  let ema9 = null, ema21 = null;
+  let isFirstLoad = true;
+
+  function clearIndicators() {
+    if (bbUpper)  { chart.removeSeries(bbUpper);  bbUpper = null; }
+    if (bbLower)  { chart.removeSeries(bbLower);  bbLower = null; }
+    if (bbMiddle) { chart.removeSeries(bbMiddle); bbMiddle = null; }
+    if (ema9)     { chart.removeSeries(ema9);     ema9 = null; }
+    if (ema21)    { chart.removeSeries(ema21);    ema21 = null; }
+  }
+
+  function setData(payload) {
+    const data = JSON.parse(payload);
+    candleSeries.setData(data.candles);
+
+    clearIndicators();
+
+    if (data.bb_upper && data.bb_upper.length) {
+      bbUpper = chart.addLineSeries({ color: '#2196F3', lineWidth: 1, lineStyle: 2 });
+      bbUpper.setData(data.bb_upper);
+      bbLower = chart.addLineSeries({ color: '#2196F3', lineWidth: 1, lineStyle: 2 });
+      bbLower.setData(data.bb_lower);
+      bbMiddle = chart.addLineSeries({ color: '#FF9800', lineWidth: 1 });
+      bbMiddle.setData(data.bb_middle);
+    }
+
+    if (data.ema9 && data.ema9.length) {
+      ema9 = chart.addLineSeries({ color: '#26a69a', lineWidth: 1 });
+      ema9.setData(data.ema9);
+      ema21 = chart.addLineSeries({ color: '#ef5350', lineWidth: 1 });
+      ema21.setData(data.ema21);
+    }
+
+    // Only auto-fit on first load; preserve user zoom/pan afterwards
+    if (isFirstLoad) {
+      chart.timeScale().fitContent();
+      isFirstLoad = false;
+    }
+  }
+
+  // Handle resize
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: document.getElementById('chart').clientWidth,
+                         height: document.getElementById('chart').clientHeight });
+  }).observe(document.getElementById('chart'));
+</script>
+</body>
+</html>

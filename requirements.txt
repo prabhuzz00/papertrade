@@ -3,6 +3,7 @@
 
 # Core dependencies
 PyQt5>=5.15.0
+PyQtWebEngine>=5.15.0
 pyqtgraph>=0.12.0
 
 # Data handling

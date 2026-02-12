@@ -1,6 +1,6 @@
 {
   "initial_capital": 1000000,
-  "current_capital": 1012463.75,
+  "current_capital": 1018104.45,
   "open_positions": [],
   "closed_trades": [
     {
@@ -20,7 +20,10 @@
       "exit_time": "2026-02-11T15:05:42.798356",
       "status": "MANUAL_EXIT",
       "pnl": -201.50000000000057,
-      "current_price": 109.35
+      "current_price": 109.35,
+      "initial_stop_loss": 79.03,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
     },
     {
       "trade_id": "EMA-0001",
@@ -39,8 +42,33 @@
       "exit_time": "2026-02-11T15:05:49.160404",
       "status": "MANUAL_EXIT",
       "pnl": -35.74999999999889,
-      "current_price": 130.8
+      "current_price": 130.8,
+      "initial_stop_loss": 91.945,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
+    },
+    {
+      "trade_id": "EMA-0003",
+      "signal_type": "CALL",
+      "entry_price": 122.35,
+      "entry_time": "2026-02-12T12:53:36.454501",
+      "quantity": 65,
+      "stop_loss": 85.645,
+      "target": 183.52499999999998,
+      "strategy": "EMA Crossover",
+      "notes": "Bullish EMA Crossover - 9 EMA crossed above 21 EMA",
+      "strike": 25850,
+      "option_type": "CE",
+      "spot_price": 25849.900390625,
+      "exit_price": 111.25,
+      "exit_time": "2026-02-12T13:13:39.857788",
+      "status": "MANUAL_EXIT",
+      "pnl": -721.4999999999997,
+      "current_price": 111.25,
+      "initial_stop_loss": 85.645,
+      "target_points": 0,
+      "trailing_sl_stage": "INITIAL"
     }
   ],
-  "trade_counter": 2
+  "trade_counter": 3
 }

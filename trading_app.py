@@ -20,6 +20,7 @@ Features:
 
 import sys
 import json
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -27,11 +28,11 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QComboBox, 
                              QTableWidget, QTableWidgetItem, QTabWidget,
                              QTextEdit, QGroupBox, QGridLayout, QMessageBox,
-                             QSplitter, QHeaderView, QDialog, QCheckBox, QDialogButtonBox)
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread
+                             QSplitter, QHeaderView, QDialog, QCheckBox, QDialogButtonBox,
+                             QSpinBox)
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread, QUrl
 from PyQt5.QtGui import QFont, QColor
-import pyqtgraph as pg
-from pyqtgraph import PlotWidget, mkPen, BarGraphItem
+from PyQt5.QtWebEngineWidgets import QWebEngineView  # type: ignore[import-not-found]
 import yfinance as yf
 
 # Import strategy modules
@@ -40,11 +41,19 @@ from strategy_wrappers import (BollingerMACDStrategy,
                                SidewaysStrategy,
                                MomentumBreakoutStrategy,
                                MeanReversionStrategy,
-                               EMACrossoverStrategy)
+                               EMACrossoverStrategy,
+                               FVGStrategy,
+                               LiquiditySweepStrategy,
+                               OrderBlockStrategy,
+                               PremiumDiscountStrategy,
+                               MSSStrategy,
+                               VWAPReversalStrategy,
+                               MultiTimeframeConfluenceStrategy)
 from paper_trading_engine import PaperTradingEngine, Trade
 from option_price_fetcher import OptionPriceFetcher
 from fetch_gold_atm_options import GoldATMOptionFetcher
 from fetch_nifty_atm_options import NiftyATMOptionFetcher
+from fetch_crude_atm_options import CrudeOilATMOptionFetcher
 
 
 class LiveDataThread(QThread):
@@ -75,6 +84,10 @@ class LiveDataThread(QThread):
                                interval=self.interval, progress=False, auto_adjust=True)
                 
                 if not df.empty and not self._stop_requested:
+                    # Flatten multi-level columns from yfinance (e.g. ('Close', 'AAPL') -> 'Close')
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    
                     # If XTS spot available, update the last close with real-time price
                     if xts_spot > 0:
                         df.loc[df.index[-1], 'Close'] = xts_spot
@@ -103,6 +116,7 @@ class PremiumUpdateThread(QThread):
     """
     premiums_updated = pyqtSignal(dict)  # Emits {(strike, option_type): premium}
     gold_spot_updated = pyqtSignal(float)
+    crude_spot_updated = pyqtSignal(float)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -114,6 +128,9 @@ class PremiumUpdateThread(QThread):
         self.gold_option_fetcher = None
         self.gold_future_id = None
         self.gold_options_cache = {}  # Set from main window
+        self.crude_option_fetcher = None
+        self.crude_future_id = None
+        self.crude_options_cache = {}
         self.option_fetcher = None  # Legacy fallback
         
         # Positions to track: list of (strike, option_type, instrument)
@@ -121,6 +138,7 @@ class PremiumUpdateThread(QThread):
         self._current_instrument = 'NIFTY 50'
         self._current_price = 0
         self._atr = 50.0
+        self._positions_by_instrument = {}  # Multi-instrument tracking
         
     def set_positions(self, positions, instrument, current_price, atr):
         """Update the list of positions to track (called from UI thread)"""
@@ -129,74 +147,100 @@ class PremiumUpdateThread(QThread):
         self._current_price = current_price
         self._atr = atr
     
+    def set_all_positions(self, positions_by_instrument):
+        """Update positions to track for ALL instruments (multi-instrument auto-trade)
+        
+        Args:
+            positions_by_instrument: {instrument: {'positions': [(strike, opt_type)], 'price': float, 'atr': float}}
+        """
+        self._positions_by_instrument = positions_by_instrument
+    
     def run(self):
-        """Fetch premiums every 3 seconds in background"""
+        """Fetch premiums every 3 seconds in background - supports all instruments"""
         while self.running and not self._stop_requested:
             try:
                 premiums = {}
                 
-                # Fetch NIFTY option premiums
-                if self._current_instrument == 'NIFTY 50' and self._positions_to_track:
-                    for strike, option_type in self._positions_to_track:
-                        if self._stop_requested:
-                            break
-                        if self.nifty_option_fetcher:
-                            try:
-                                price, source = self.nifty_option_fetcher.get_option_ltp(
-                                    strike, option_type, self._current_price, self._atr
-                                )
-                                premiums[(strike, option_type)] = price
-                            except Exception:
-                                pass
-                        elif self.option_fetcher:
-                            try:
-                                price = self.option_fetcher.get_option_ltp(
-                                    strike, option_type, self._current_price, self._atr
-                                )
-                                premiums[(strike, option_type)] = price
-                            except Exception:
-                                pass
+                # Always fetch GOLD spot price (needed for option pricing even in background)
+                if self.gold_option_fetcher and self.gold_future_id:
+                    try:
+                        quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
+                        if quote:
+                            spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                            if spot > 0:
+                                self.gold_spot_updated.emit(spot)
+                    except Exception:
+                        pass
                 
-                # Fetch GOLD spot + option premiums
-                elif self._current_instrument == 'GOLD':
-                    if self.gold_option_fetcher and self.gold_future_id:
-                        try:
-                            quote = self.gold_option_fetcher.get_quote(self.gold_future_id)
-                            if quote:
-                                spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
-                                if spot > 0:
-                                    self.gold_spot_updated.emit(spot)
-                        except Exception:
-                            pass
+                # Always fetch CRUDE OIL spot price
+                if self.crude_option_fetcher and self.crude_future_id:
+                    try:
+                        quote = self.crude_option_fetcher.get_quote(self.crude_future_id)
+                        if quote:
+                            spot = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                            if spot > 0:
+                                self.crude_spot_updated.emit(spot)
+                    except Exception:
+                        pass
+                
+                # Fetch option premiums for ALL instruments with tracked positions
+                for instrument, info in self._positions_by_instrument.items():
+                    positions = info.get('positions', [])
+                    price = info.get('price', 0)
+                    atr = info.get('atr', 50.0)
                     
-                    if not self._positions_to_track:
-                        pass  # No positions to track
-                    elif not self.gold_option_fetcher:
-                        print("[GOLD-THREAD] No gold_option_fetcher available")
-                    elif not self.gold_options_cache:
-                        print("[GOLD-THREAD] gold_options_cache is empty")
+                    if not positions:
+                        continue
                     
-                    for strike, option_type in self._positions_to_track:
+                    for strike, option_type in positions:
                         if self._stop_requested:
                             break
-                        if self.gold_option_fetcher and self.gold_options_cache:
-                            try:
-                                key = (strike, option_type)
-                                if key in self.gold_options_cache:
-                                    opt_info = self.gold_options_cache[key]
-                                    quote = self.gold_option_fetcher.get_quote(opt_info['instrument_id'])
-                                    if quote:
-                                        ltp = quote['ltp'] if quote['ltp'] > 0 else quote['close']
-                                        if ltp > 0:
-                                            premiums[key] = ltp
-                                        else:
-                                            print(f"[GOLD-THREAD] {strike} {option_type}: LTP=0, Close=0")
-                                    else:
-                                        print(f"[GOLD-THREAD] {strike} {option_type}: get_quote returned None")
-                                else:
-                                    print(f"[GOLD-THREAD] Key ({strike}, {option_type}) not in gold_options_cache. Available strikes: {sorted(set(k[0] for k in self.gold_options_cache.keys()))[:10]}")
-                            except Exception as e:
-                                print(f"[GOLD-THREAD] Error fetching {strike} {option_type}: {e}")
+                        
+                        if instrument == 'NIFTY 50':
+                            if self.nifty_option_fetcher:
+                                try:
+                                    p, source = self.nifty_option_fetcher.get_option_ltp(
+                                        strike, option_type, price, atr
+                                    )
+                                    premiums[(strike, option_type)] = p
+                                except Exception:
+                                    pass
+                            elif self.option_fetcher:
+                                try:
+                                    p = self.option_fetcher.get_option_ltp(
+                                        strike, option_type, price, atr
+                                    )
+                                    premiums[(strike, option_type)] = p
+                                except Exception:
+                                    pass
+                        
+                        elif instrument == 'GOLD':
+                            if self.gold_option_fetcher and self.gold_options_cache:
+                                try:
+                                    key = (strike, option_type)
+                                    if key in self.gold_options_cache:
+                                        opt_info = self.gold_options_cache[key]
+                                        quote = self.gold_option_fetcher.get_quote(opt_info['instrument_id'])
+                                        if quote:
+                                            ltp = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                                            if ltp > 0:
+                                                premiums[key] = ltp
+                                except Exception as e:
+                                    print(f"[GOLD-THREAD] Error fetching {strike} {option_type}: {e}")
+                        
+                        elif instrument == 'CRUDE OIL':
+                            if self.crude_option_fetcher and self.crude_options_cache:
+                                try:
+                                    key = (strike, option_type)
+                                    if key in self.crude_options_cache:
+                                        opt_info = self.crude_options_cache[key]
+                                        quote = self.crude_option_fetcher.get_quote(opt_info['instrument_id'])
+                                        if quote:
+                                            ltp = quote['ltp'] if quote['ltp'] > 0 else quote['close']
+                                            if ltp > 0:
+                                                premiums[key] = ltp
+                                except Exception as e:
+                                    print(f"[CRUDE-THREAD] Error fetching {strike} {option_type}: {e}")
                 
                 if premiums and not self._stop_requested:
                     self.premiums_updated.emit(premiums)
@@ -293,25 +337,281 @@ class StrategySelectionDialog(QDialog):
                 if checkbox.isChecked()]
 
 
+class AutoTradeConfigDialog(QDialog):
+    """Dialog for configuring multi-instrument auto trading with per-instrument target points"""
+    
+    def __init__(self, strategies, instruments, selected_strategies=None,
+                 selected_instruments=None, target_points=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Auto Trading Configuration")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        
+        self.strategy_checkboxes = {}
+        self.instrument_checkboxes = {}
+        self.target_spinboxes = {}
+        
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Title
+        title = QLabel("<h3>Auto Trading Configuration</h3>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # --- Instruments Section ---
+        inst_group = QGroupBox("Instruments && Target Points")
+        inst_layout = QVBoxLayout()
+        inst_group.setLayout(inst_layout)
+        
+        inst_info = QLabel("Select instruments and set target points (SL = 50% of target):")
+        inst_info.setWordWrap(True)
+        inst_layout.addWidget(inst_info)
+        inst_layout.addSpacing(5)
+        
+        for inst_name in instruments:
+            row = QHBoxLayout()
+            
+            cb = QCheckBox(inst_name)
+            if selected_instruments is None:
+                cb.setChecked(True)
+            else:
+                cb.setChecked(inst_name in selected_instruments)
+            self.instrument_checkboxes[inst_name] = cb
+            cb.setMinimumWidth(120)
+            row.addWidget(cb)
+            
+            row.addStretch()
+            
+            row.addWidget(QLabel("Target:"))
+            spin = QSpinBox()
+            spin.setRange(1, 10000)
+            spin.setValue(target_points.get(inst_name, 10) if target_points else 10)
+            spin.setSuffix(" pts")
+            spin.setMinimumWidth(100)
+            spin.setToolTip(f"Target points for {inst_name}. SL = 50% of target.\n"
+                           f"Trailing SL: At 50% → entry+1, At 75% → entry+50% of target")
+            self.target_spinboxes[inst_name] = spin
+            row.addWidget(spin)
+            
+            inst_layout.addLayout(row)
+        
+        layout.addWidget(inst_group)
+        
+        # --- Strategies Section ---
+        strat_group = QGroupBox("Strategies")
+        strat_layout = QVBoxLayout()
+        strat_group.setLayout(strat_layout)
+        
+        strat_info = QLabel("Select strategies for auto trading:")
+        strat_layout.addWidget(strat_info)
+        strat_layout.addSpacing(5)
+        
+        for strat_name in strategies:
+            cb = QCheckBox(strat_name)
+            if selected_strategies is None:
+                cb.setChecked(True)
+            else:
+                cb.setChecked(strat_name in selected_strategies)
+            self.strategy_checkboxes[strat_name] = cb
+            strat_layout.addWidget(cb)
+        
+        strat_layout.addSpacing(5)
+        
+        # Select/Deselect all buttons
+        btn_layout = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(self._select_all_strategies)
+        deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.clicked.connect(self._deselect_all_strategies)
+        btn_layout.addWidget(select_all_btn)
+        btn_layout.addWidget(deselect_all_btn)
+        strat_layout.addLayout(btn_layout)
+        
+        layout.addWidget(strat_group)
+        
+        layout.addSpacing(10)
+        
+        # OK / Cancel
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+    
+    def _select_all_strategies(self):
+        for cb in self.strategy_checkboxes.values():
+            cb.setChecked(True)
+    
+    def _deselect_all_strategies(self):
+        for cb in self.strategy_checkboxes.values():
+            cb.setChecked(False)
+    
+    def get_selected_strategies(self):
+        return [name for name, cb in self.strategy_checkboxes.items() if cb.isChecked()]
+    
+    def get_selected_instruments(self):
+        return [name for name, cb in self.instrument_checkboxes.items() if cb.isChecked()]
+    
+    def get_target_points(self):
+        return {name: spin.value() for name, spin in self.target_spinboxes.items()}
+
+
 class CandlestickChart(QWidget):
-    """Candlestick chart widget using pyqtgraph"""
+    """Candlestick chart widget using TradingView Lightweight Charts"""
+    
+    _CHART_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #ffffff; overflow: hidden; }
+  #chart { width: 100%%; height: 100vh; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<script src="_lw_charts.js"></script>
+<script>
+  const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: {
+      background: { type: 'solid', color: '#ffffff' },
+      textColor: '#333333',
+    },
+    grid: {
+      vertLines: { color: '#e1e3e6' },
+      horzLines: { color: '#e1e3e6' },
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+    },
+    rightPriceScale: {
+      borderColor: '#cccccc',
+    },
+    timeScale: {
+      borderColor: '#cccccc',
+      timeVisible: true,
+      secondsVisible: false,
+    },
+    localization: {
+      locale: 'en-IN',
+    },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#26a69a',
+    downColor: '#ef5350',
+    borderDownColor: '#ef5350',
+    borderUpColor: '#26a69a',
+    wickDownColor: '#ef5350',
+    wickUpColor: '#26a69a',
+  });
+
+  // Indicator line series (created on demand)
+  let bbUpper = null, bbLower = null, bbMiddle = null;
+  let ema9 = null, ema21 = null;
+  let isFirstLoad = true;
+
+  function clearIndicators() {
+    if (bbUpper)  { chart.removeSeries(bbUpper);  bbUpper = null; }
+    if (bbLower)  { chart.removeSeries(bbLower);  bbLower = null; }
+    if (bbMiddle) { chart.removeSeries(bbMiddle); bbMiddle = null; }
+    if (ema9)     { chart.removeSeries(ema9);     ema9 = null; }
+    if (ema21)    { chart.removeSeries(ema21);    ema21 = null; }
+  }
+
+  function setData(payload) {
+    const data = JSON.parse(payload);
+    candleSeries.setData(data.candles);
+
+    clearIndicators();
+
+    if (data.bb_upper && data.bb_upper.length) {
+      bbUpper = chart.addLineSeries({ color: '#2196F3', lineWidth: 1, lineStyle: 2 });
+      bbUpper.setData(data.bb_upper);
+      bbLower = chart.addLineSeries({ color: '#2196F3', lineWidth: 1, lineStyle: 2 });
+      bbLower.setData(data.bb_lower);
+      bbMiddle = chart.addLineSeries({ color: '#FF9800', lineWidth: 1 });
+      bbMiddle.setData(data.bb_middle);
+    }
+
+    if (data.ema9 && data.ema9.length) {
+      ema9 = chart.addLineSeries({ color: '#26a69a', lineWidth: 1 });
+      ema9.setData(data.ema9);
+      ema21 = chart.addLineSeries({ color: '#ef5350', lineWidth: 1 });
+      ema21.setData(data.ema21);
+    }
+
+    // Only auto-fit on first load; preserve user zoom/pan afterwards
+    if (isFirstLoad) {
+      chart.timeScale().fitContent();
+      isFirstLoad = false;
+    }
+  }
+
+  // Handle resize
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: document.getElementById('chart').clientWidth,
+                         height: document.getElementById('chart').clientHeight });
+  }).observe(document.getElementById('chart'));
+</script>
+</body>
+</html>
+"""
     
     def __init__(self):
         super().__init__()
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
+        self._layout = QVBoxLayout()
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(self._layout)
         
-        # Create plot widget
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('w')
-        self.plot_widget.setLabel('left', 'Price', units='₹')
-        self.plot_widget.setLabel('bottom', 'Time')
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        # Setup local chart assets (download JS library once, write HTML)
+        self._base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._ensure_chart_assets()
         
-        self.layout.addWidget(self.plot_widget)
+        # Create web view and load local HTML file
+        self.web_view = QWebEngineView()
+        html_path = os.path.join(self._base_dir, '_chart.html')
+        self.web_view.setUrl(QUrl.fromLocalFile(html_path))
+        self._layout.addWidget(self.web_view)
+        
+        # Track if page is loaded
+        self._page_loaded = False
+        self._pending_data = None
+        self.web_view.loadFinished.connect(self._on_page_loaded)
         
         # Store data
         self.df = None
+    
+    def _ensure_chart_assets(self):
+        """Download Lightweight Charts JS library (once) and write the HTML file"""
+        js_path = os.path.join(self._base_dir, '_lw_charts.js')
+        html_path = os.path.join(self._base_dir, '_chart.html')
+        
+        # Download the JS library if not already present
+        if not os.path.exists(js_path):
+            import urllib.request
+            url = "https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
+            print("[INFO] Downloading TradingView Lightweight Charts library...")
+            try:
+                urllib.request.urlretrieve(url, js_path)
+                print(f"[OK] Chart library saved to {js_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to download chart library: {e}")
+                print("[INFO] Please download manually from:")
+                print(f"  {url}")
+                print(f"  Save as: {js_path}")
+        
+        # Always write/update the HTML file
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(self._CHART_HTML_TEMPLATE)
+    
+    def _on_page_loaded(self, ok):
+        """Called when the HTML page finishes loading"""
+        self._page_loaded = ok
+        if ok and self._pending_data is not None:
+            self._send_data(self._pending_data)
+            self._pending_data = None
         
     def update_chart(self, df):
         """Update candlestick chart with new data"""
@@ -319,78 +619,94 @@ class CandlestickChart(QWidget):
             return
             
         self.df = df
-        self.plot_widget.clear()
         
-        # Take only last 100 candles for better visibility
-        df_display = df.tail(100).copy()
+        # Take last 200 candles
+        df_display = df.tail(200).copy()
         
-        # Prepare candlestick data
-        times = np.arange(len(df_display))
+        payload = self._build_payload(df_display)
         
-        # Draw candlesticks
-        for i in range(len(df_display)):
-            row = df_display.iloc[i]
-            open_price = row['Open'].item()
-            close_price = row['Close'].item()
-            high_price = row['High'].item()
-            low_price = row['Low'].item()
-            
-            # Determine color
-            if close_price >= open_price:
-                color = pg.mkBrush(0, 255, 0, 150)  # Green
-                pen_color = pg.mkPen('g', width=1)
+        if self._page_loaded:
+            self._send_data(payload)
+        else:
+            self._pending_data = payload
+    
+    # IST offset in seconds (UTC+5:30 = 19800s)
+    _IST_OFFSET = 19800
+    
+    @staticmethod
+    def _to_scalar(val):
+        """Convert a value that might be a Series/ndarray to a Python scalar"""
+        if hasattr(val, 'item'):
+            return val.item()
+        return float(val)
+    
+    def _build_payload(self, df_display):
+        """Build JSON payload for Lightweight Charts"""
+        # Flatten multi-level columns from yfinance (e.g. ('Open','NSEI') -> 'Open')
+        if isinstance(df_display.columns, pd.MultiIndex):
+            df_display = df_display.copy()
+            df_display.columns = df_display.columns.get_level_values(0)
+        
+        candles = []
+        for idx, row in df_display.iterrows():
+            # Convert timestamp to unix seconds + IST offset
+            if hasattr(idx, 'timestamp'):
+                t = int(idx.timestamp()) + self._IST_OFFSET
             else:
-                color = pg.mkBrush(255, 0, 0, 150)  # Red
-                pen_color = pg.mkPen('r', width=1)
+                t = int(pd.Timestamp(idx).timestamp()) + self._IST_OFFSET
             
-            # Draw high-low line (wick)
-            self.plot_widget.plot([i, i], [low_price, high_price], 
-                                pen=pen_color)
+            o = row['Open']
+            h = row['High']
+            l = row['Low']
+            c = row['Close']
+            # Handle Series values (from duplicate column names after flattening)
+            if hasattr(o, 'item'):
+                o, h, l, c = o.item(), h.item(), l.item(), c.item()
             
-            # Draw body (only if there's a difference)
-            body_height = abs(close_price - open_price)
-            if body_height < 0.1:  # Very small body
-                body_height = 0.1
-            
-            body_y = min(open_price, close_price)
-            
-            bar = pg.BarGraphItem(x=[i], height=[body_height],
-                                 y0=[body_y], width=0.6, 
-                                 brush=color, pen=pen_color)
-            self.plot_widget.addItem(bar)
+            candles.append({
+                'time': t,
+                'open': round(self._to_scalar(o), 2),
+                'high': round(self._to_scalar(h), 2),
+                'low': round(self._to_scalar(l), 2),
+                'close': round(self._to_scalar(c), 2),
+            })
+        
+        payload = {'candles': candles}
         
         # Add Bollinger Bands if available
         if 'BB_upper' in df_display.columns and not df_display['BB_upper'].isna().all():
-            bb_upper = df_display['BB_upper'].ffill().bfill()
-            bb_lower = df_display['BB_lower'].ffill().bfill()
-            bb_middle = df_display['BB_middle'].ffill().bfill()
-            
-            self.plot_widget.plot(times, bb_upper.values, 
-                                pen=pg.mkPen('b', width=2, style=Qt.DashLine))
-            self.plot_widget.plot(times, bb_lower.values, 
-                                pen=pg.mkPen('b', width=2, style=Qt.DashLine))
-            self.plot_widget.plot(times, bb_middle.values, 
-                                pen=pg.mkPen((255, 165, 0), width=2))  # Orange
+            bb_u, bb_l, bb_m = [], [], []
+            for idx, row in df_display.iterrows():
+                bu, bl, bm = row.get('BB_upper'), row.get('BB_lower'), row.get('BB_middle')
+                if bu is not None and pd.notna(self._to_scalar(bu)) and bl is not None and pd.notna(self._to_scalar(bl)):
+                    t = (int(idx.timestamp()) if hasattr(idx, 'timestamp') else int(pd.Timestamp(idx).timestamp())) + self._IST_OFFSET
+                    bb_u.append({'time': t, 'value': round(self._to_scalar(bu), 2)})
+                    bb_l.append({'time': t, 'value': round(self._to_scalar(bl), 2)})
+                    bb_m.append({'time': t, 'value': round(self._to_scalar(bm), 2)})
+            payload['bb_upper'] = bb_u
+            payload['bb_lower'] = bb_l
+            payload['bb_middle'] = bb_m
         
         # Add EMA lines if available
         if 'EMA_9' in df_display.columns and not df_display['EMA_9'].isna().all():
-            ema9 = df_display['EMA_9'].ffill().bfill()
-            ema21 = df_display['EMA_21'].ffill().bfill()
-            
-            self.plot_widget.plot(times, ema9.values, 
-                                pen=pg.mkPen((0, 255, 0), width=2))  # Green for 9 EMA
-            self.plot_widget.plot(times, ema21.values, 
-                                pen=pg.mkPen((255, 0, 0), width=2))  # Red for 21 EMA
+            e9, e21 = [], []
+            for idx, row in df_display.iterrows():
+                v9, v21 = row.get('EMA_9'), row.get('EMA_21')
+                if v9 is not None and pd.notna(self._to_scalar(v9)) and v21 is not None and pd.notna(self._to_scalar(v21)):
+                    t = (int(idx.timestamp()) if hasattr(idx, 'timestamp') else int(pd.Timestamp(idx).timestamp())) + self._IST_OFFSET
+                    e9.append({'time': t, 'value': round(self._to_scalar(v9), 2)})
+                    e21.append({'time': t, 'value': round(self._to_scalar(v21), 2)})
+            payload['ema9'] = e9
+            payload['ema21'] = e21
         
-        # Set axis range manually
-        if len(df_display) > 0:
-            price_min = df_display['Low'].min().item()
-            price_max = df_display['High'].max().item()
-            price_range = price_max - price_min
-            
-            self.plot_widget.setYRange(price_min - price_range * 0.1, 
-                                      price_max + price_range * 0.1)
-            self.plot_widget.setXRange(0, len(df_display))
+        return json.dumps(payload)
+    
+    def _send_data(self, payload_json):
+        """Send data to the Lightweight Charts via JavaScript"""
+        # Escape for JS string
+        escaped = payload_json.replace('\\', '\\\\').replace("'", "\\'")
+        js = f"setData('{escaped}');"
+        self.web_view.page().runJavaScript(js)
 
 
 class TradingMainWindow(QMainWindow):
@@ -399,7 +715,7 @@ class TradingMainWindow(QMainWindow):
     # Instrument configurations
     INSTRUMENTS = {
         'NIFTY 50': {'symbol': '^NSEI', 'name': 'NIFTY 50', 'xts_enabled': True, 'interval': '5m', 'lot_size': 65},
-        'CRUDE OIL': {'symbol': 'CL=F', 'name': 'Crude Oil', 'xts_enabled': False, 'interval': '1m', 'lot_size': 1},
+        'CRUDE OIL': {'symbol': 'CL=F', 'name': 'Crude Oil', 'xts_enabled': True, 'interval': '1m', 'lot_size': 100},
         'GOLD': {'symbol': 'GC=F', 'name': 'Gold', 'xts_enabled': True, 'interval': '1m', 'lot_size': 100}
     }
     
@@ -418,7 +734,14 @@ class TradingMainWindow(QMainWindow):
             'Sideways Market': SidewaysStrategy(),
             'Momentum Breakout': MomentumBreakoutStrategy(),
             'Mean Reversion': MeanReversionStrategy(),
-            'EMA Crossover': EMACrossoverStrategy()
+            'EMA Crossover': EMACrossoverStrategy(),
+            'FVG (Fair Value Gap)': FVGStrategy(),
+            'Liquidity Sweep': LiquiditySweepStrategy(),
+            'Order Block': OrderBlockStrategy(),
+            'Premium/Discount Zone': PremiumDiscountStrategy(),
+            'Market Structure Shift': MSSStrategy(),
+            'VWAP Reversal': VWAPReversalStrategy(),
+            'Multi-TF Confluence': MultiTimeframeConfluenceStrategy()
         }
         
         self.current_strategy = 'Bollinger + MACD'
@@ -437,6 +760,13 @@ class TradingMainWindow(QMainWindow):
         
         # Store selected strategies for auto trading
         self.selected_auto_trade_strategies = list(self.strategies.keys())  # All selected by default
+        
+        # Multi-instrument auto-trade config
+        self.auto_trade_instruments = list(self.INSTRUMENTS.keys())  # All instruments by default
+        self.auto_trade_target_points = {name: 10 for name in self.INSTRUMENTS.keys()}
+        self.auto_trade_data = {}  # {instrument: DataFrame} for background instruments
+        self.auto_trade_threads = {}  # {instrument: LiveDataThread}
+        self.auto_trade_prices = {}  # {instrument: current_price}
         
         # Initialize option price fetcher (legacy - used as fallback)
         self.option_fetcher = OptionPriceFetcher(use_xts=True)
@@ -460,15 +790,27 @@ class TradingMainWindow(QMainWindow):
         self.gold_expiry = None
         self.init_gold_options()
         
+        # Initialize Crude Oil option fetcher (MCX via instrument master)
+        self.crude_option_fetcher = None
+        self.crude_options_cache = {}
+        self.crude_spot_price = 0
+        self.crude_future_id = None
+        self.crude_expiry = None
+        self.init_crude_options()
+        
         # Start background premium update thread (fetches option prices without blocking UI)
         self.premium_thread = PremiumUpdateThread()
         self.premium_thread.nifty_option_fetcher = self.nifty_option_fetcher
         self.premium_thread.gold_option_fetcher = self.gold_option_fetcher
         self.premium_thread.gold_future_id = self.gold_future_id
         self.premium_thread.gold_options_cache = self.gold_options_cache
+        self.premium_thread.crude_option_fetcher = self.crude_option_fetcher
+        self.premium_thread.crude_future_id = self.crude_future_id
+        self.premium_thread.crude_options_cache = self.crude_options_cache
         self.premium_thread.option_fetcher = self.option_fetcher
         self.premium_thread.premiums_updated.connect(self._on_premiums_updated)
         self.premium_thread.gold_spot_updated.connect(self._on_gold_spot_updated)
+        self.premium_thread.crude_spot_updated.connect(self._on_crude_spot_updated)
         self.premium_thread.start()
         
         # Setup UI
@@ -503,7 +845,7 @@ class TradingMainWindow(QMainWindow):
         print("="*70)
         print(f"Starting Capital: ₹{1000000:,} (10 Lakhs)")
         print(f"Trading Mode: Paper Trading (Options)")
-        print(f"NIFTY Lot Size: 65 | GOLD Lot Size: 100")
+        print(f"NIFTY Lot Size: 65 | GOLD Lot Size: 100 | CRUDE OIL Lot Size: 100")
         if self.nifty_options_cache:
             print(f"NIFTY Options: {len(self.nifty_options_cache)} contracts (LIVE from XTS), expiry={self.nifty_expiry}")
         else:
@@ -512,6 +854,10 @@ class TradingMainWindow(QMainWindow):
             print(f"MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
         if self.gold_expiry:
             print(f"Gold Options Expiry: {self.gold_expiry}")
+        if self.crude_spot_price > 0:
+            print(f"MCX Crude Oil Spot: ₹{self.crude_spot_price:,.1f}")
+        if self.crude_expiry:
+            print(f"Crude Oil Options Expiry: {self.crude_expiry}")
         print("="*70 + "\n")
         
     def load_initial_data(self):
@@ -590,6 +936,53 @@ class TradingMainWindow(QMainWindow):
             print(f"[WARNING] Gold options init error: {e}")
             return False
     
+    def init_crude_options(self):
+        """Initialize Crude Oil option data from XTS instrument master"""
+        try:
+            self.crude_option_fetcher = CrudeOilATMOptionFetcher()
+            if self.crude_option_fetcher.initialize("CRUDEOIL"):
+                self.crude_options_cache = self.crude_option_fetcher.instrument_cache
+                self.crude_expiry = self.crude_option_fetcher.expiry
+                self.crude_future_id = self.crude_option_fetcher.future_id
+                self.crude_spot_price = self.crude_option_fetcher.spot_price
+                print(f"[OK] Crude Oil options ready: {len(self.crude_options_cache)} contracts, expiry={self.crude_expiry}")
+                return True
+            else:
+                print("[WARNING] Crude Oil option fetcher initialization failed")
+                return False
+        except Exception as e:
+            print(f"[WARNING] Crude Oil options init error: {e}")
+            return False
+    
+    def get_crude_option_data(self, signal_type, spot_price, atr=100):
+        """
+        Get Crude Oil option data for trading.
+        
+        Args:
+            signal_type: 'CALL' or 'PUT'
+            spot_price: MCX Crude Oil spot price (INR per barrel)
+            atr: Average True Range
+        
+        Returns:
+            dict with strike, option_type, premium, stop_loss, target, spot_price
+        """
+        if not self.crude_options_cache or not self.crude_option_fetcher:
+            return None
+        
+        return self.crude_option_fetcher.get_option_data(signal_type, spot_price, atr)
+    
+    def get_crude_option_ltp(self, strike, option_type, spot_price, atr=100):
+        """
+        Get current Crude Oil option LTP for a specific strike.
+        
+        Returns:
+            Float premium value
+        """
+        if not self.crude_option_fetcher:
+            return 0
+        
+        return self.crude_option_fetcher.get_option_ltp(strike, option_type, spot_price, atr)
+    
     def get_gold_option_data(self, signal_type, spot_price, atr=500):
         """
         Get Gold option data for trading (similar to OptionPriceFetcher.get_option_data)
@@ -630,6 +1023,7 @@ class TradingMainWindow(QMainWindow):
             premium = self.gold_option_fetcher.estimate_option_price(spot_price, key[0], option_type)
         
         # SL: 30% loss, Target: 50% profit (same as NIFTY)
+        # NOTE: SL and Target are now set from UI target_points, these are just defaults
         stop_loss = premium * 0.70
         target = premium * 1.50
         
@@ -742,8 +1136,21 @@ class TradingMainWindow(QMainWindow):
         self.option_indicator.setToolTip("Trading Options with real-time premiums via XTS")
         layout.addWidget(self.option_indicator)
         # Hide initially, show only for options-enabled instruments
-        if self.current_instrument not in ['NIFTY 50', 'GOLD']:
+        if self.current_instrument not in ['NIFTY 50', 'GOLD', 'CRUDE OIL']:
             self.option_indicator.hide()
+        
+        layout.addStretch()
+        
+        # Target points input
+        layout.addWidget(QLabel("Target (pts):"))
+        self.target_points_spin = QSpinBox()
+        self.target_points_spin.setRange(1, 10000)
+        self.target_points_spin.setValue(10)
+        self.target_points_spin.setSuffix(" pts")
+        self.target_points_spin.setToolTip("Target in points from entry price. SL = 50% of target.\n"
+                                           "Trailing SL: At 50% target → SL=entry+1, At 75% target → SL=entry+50% of target")
+        self.target_points_spin.setMinimumWidth(90)
+        layout.addWidget(self.target_points_spin)
         
         layout.addStretch()
         
@@ -914,12 +1321,16 @@ class TradingMainWindow(QMainWindow):
         self.data_thread.data_ready.connect(self.on_data_update)
         self.data_thread.start()
         
+        # Manage auto-trade background threads on instrument switch
+        if self.auto_trade_btn.isChecked():
+            self._start_auto_trade_threads()  # Restarts threads (skips new current instrument)
+        
         # Update window title
-        title_suffix = " Options Trading" if instrument_name in ['NIFTY 50', 'GOLD'] else " Live Trading"
+        title_suffix = " Options Trading" if instrument_name in ['NIFTY 50', 'GOLD', 'CRUDE OIL'] else " Live Trading"
         self.setWindowTitle(f"{instrument_config['name']}{title_suffix} System")
         
         # Show/hide option indicator
-        if instrument_name in ['NIFTY 50', 'GOLD']:
+        if instrument_name in ['NIFTY 50', 'GOLD', 'CRUDE OIL']:
             self.option_indicator.show()
         else:
             self.option_indicator.hide()
@@ -939,6 +1350,12 @@ class TradingMainWindow(QMainWindow):
                 print(f"[INFO] MCX Gold Spot: ₹{self.gold_spot_price:,.1f}")
             if self.gold_expiry:
                 print(f"[INFO] Gold Options Expiry: {self.gold_expiry}")
+        elif instrument_name == 'CRUDE OIL':
+            print(f"[INFO] Trading MCX CRUDE OIL Options with real-time premiums")
+            if self.crude_spot_price > 0:
+                print(f"[INFO] MCX Crude Spot: ₹{self.crude_spot_price:,.1f}")
+            if self.crude_expiry:
+                print(f"[INFO] Crude Oil Options Expiry: {self.crude_expiry}")
         
     def on_strategy_changed(self, strategy_name):
         """Handle strategy selection change"""
@@ -971,6 +1388,25 @@ class TradingMainWindow(QMainWindow):
             # Get strategy and add indicators
             strategy = self.strategies[self.current_strategy]
             df_with_indicators = strategy.add_indicators(self.current_data.copy())
+            
+            # For GOLD: convert USD (COMEX) prices to INR (MCX) using live ratio
+            if self.current_instrument == 'GOLD' and self.gold_spot_price > 0 and self.current_price > 0:
+                conversion_factor = self.gold_spot_price / self.current_price
+                price_cols = ['Open', 'High', 'Low', 'Close']
+                # Also convert indicator columns if present
+                indicator_cols = ['BB_upper', 'BB_lower', 'BB_middle', 'EMA_9', 'EMA_21']
+                for col in price_cols + indicator_cols:
+                    if col in df_with_indicators.columns:
+                        df_with_indicators[col] = df_with_indicators[col] * conversion_factor
+            
+            # For CRUDE OIL: convert USD (NYMEX) to INR (MCX) using live ratio
+            if self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0 and self.current_price > 0:
+                conversion_factor = self.crude_spot_price / self.current_price
+                price_cols = ['Open', 'High', 'Low', 'Close']
+                indicator_cols = ['BB_upper', 'BB_lower', 'BB_middle', 'EMA_9', 'EMA_21']
+                for col in price_cols + indicator_cols:
+                    if col in df_with_indicators.columns:
+                        df_with_indicators[col] = df_with_indicators[col] * conversion_factor
             
             # Update chart
             self.chart.update_chart(df_with_indicators)
@@ -1084,6 +1520,37 @@ class TradingMainWindow(QMainWindow):
                         entry_price = signal_info.get('entry_price', self.current_price)
                         stop_loss = signal_info.get('stop_loss', 0)
                         target = signal_info.get('target', 0)
+                
+                # For CRUDE OIL options, fetch from MCX via instrument master
+                elif self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+                    if signal_type in _option_data_cache:
+                        option_data = _option_data_cache[signal_type]
+                    else:
+                        option_data = self.get_crude_option_data(
+                            signal_type=signal_type,
+                            spot_price=self.crude_spot_price,
+                            atr=atr
+                        )
+                        _option_data_cache[signal_type] = option_data
+                    
+                    if option_data:
+                        entry_price = option_data['premium']
+                        stop_loss = option_data['stop_loss']
+                        target = option_data['target']
+                        
+                        signal_info['entry_price'] = entry_price
+                        signal_info['stop_loss'] = stop_loss
+                        signal_info['target'] = target
+                        signal_info['strike'] = option_data['strike']
+                        signal_info['option_type'] = option_data['option_type']
+                        signal_info['spot_price'] = option_data['spot_price']
+                        
+                        self._premium_cache[(option_data['strike'], option_data['option_type'])] = entry_price
+                    else:
+                        entry_price = signal_info.get('entry_price', self.current_price)
+                        stop_loss = signal_info.get('stop_loss', 0)
+                        target = signal_info.get('target', 0)
+                
                 else:
                     # For other instruments, use existing values
                     entry_price = signal_info.get('entry_price', self.current_price)
@@ -1092,6 +1559,12 @@ class TradingMainWindow(QMainWindow):
                 
                 # Only update UI if this is the currently selected strategy
                 if strategy_name == self.current_strategy:
+                    # Compute SL/Target from user-configured target points for display
+                    target_points = self.target_points_spin.value()
+                    sl_points = target_points / 2.0
+                    display_target = entry_price + target_points
+                    display_sl = entry_price - sl_points
+                    
                     # Update signal display
                     color = 'green' if signal_type == 'CALL' else 'red' if signal_type == 'PUT' else 'gray'
                     self.signal_label.setText(f"[SIGNAL] {signal_type}")
@@ -1109,13 +1582,15 @@ class TradingMainWindow(QMainWindow):
                         details += f"""<b>Spot Price:</b> ₹{option_data['spot_price']:,.2f}<br>
 <b>Option:</b> {instrument_name} {option_data['strike']} {option_data['option_type']}<br>
 <b>Premium:</b> ₹{entry_price:.2f}<br>
-<b>Stop Loss:</b> ₹{stop_loss:.2f} (-30%)<br>
-<b>Target:</b> ₹{target:.2f} (+50%)<br>
+<b>Target:</b> ₹{display_target:.2f} (+{target_points} pts)<br>
+<b>Stop Loss:</b> ₹{display_sl:.2f} (-{sl_points:.0f} pts)<br>
+<b>Trailing SL:</b> At 50% → entry+1, At 75% → entry+{sl_points:.0f}<br>
 <b>Cost ({lot_size} qty):</b> ₹{entry_price * lot_size:,.2f}<br>"""
                     else:
                         details += f"""<b>Entry Price:</b> ₹{entry_price:.2f}<br>
-<b>Stop Loss:</b> ₹{stop_loss:.2f}<br>
-<b>Target:</b> ₹{target:.2f}<br>"""
+<b>Target:</b> ₹{display_target:.2f} (+{target_points} pts)<br>
+<b>Stop Loss:</b> ₹{display_sl:.2f} (-{sl_points:.0f} pts)<br>
+<b>Trailing SL:</b> At 50% → entry+1, At 75% → entry+{sl_points:.0f}<br>"""
                     
                     if stop_loss > 0 and entry_price > stop_loss:
                         risk_reward = (target - entry_price) / (entry_price - stop_loss)
@@ -1126,20 +1601,25 @@ class TradingMainWindow(QMainWindow):
                     self.signal_details.setHtml(details)
                     self.manual_trade_btn.setEnabled(True)
                 
-                # Auto-execute if enabled AND strategy is selected for auto trading
+                # Auto-execute if enabled AND strategy is selected AND instrument is selected
                 if self.auto_trade_btn.isChecked():
-                    if strategy_name in self.selected_auto_trade_strategies:
+                    if (strategy_name in self.selected_auto_trade_strategies and
+                            self.current_instrument in self.auto_trade_instruments):
                         # Check if strategy already has an open position (prevent duplicate trades)
                         engine_key = f"{self.current_instrument}_{strategy_name}"
                         engine = self.trading_engines.get(engine_key)
                         
                         if engine and len(engine.open_positions) == 0:
-                            print(f"[AUTO-TRADE] Executing {strategy_name} - Selected strategies: {self.selected_auto_trade_strategies}")
-                            self.execute_trade(signal_info, strategy_name)
+                            # Use per-instrument target points for auto-trade
+                            inst_target = self.auto_trade_target_points.get(
+                                self.current_instrument, self.target_points_spin.value()
+                            )
+                            print(f"[AUTO-TRADE] {self.current_instrument} | {strategy_name} | {signal_info['signal']}")
+                            self._execute_auto_trade_for_instrument(
+                                self.current_instrument, signal_info, strategy_name, inst_target
+                            )
                         elif engine and len(engine.open_positions) > 0:
-                            print(f"[AUTO-TRADE] Skipping {strategy_name} - Already has {len(engine.open_positions)} open position(s)")
-                    else:
-                        print(f"[AUTO-TRADE] Skipping {strategy_name} - Not in selected strategies: {self.selected_auto_trade_strategies}")
+                            pass  # Skip - already has open position
         
         # Clear signal display if current strategy has no signal
         current_strategy = self.strategies[self.current_strategy]
@@ -1154,9 +1634,16 @@ class TradingMainWindow(QMainWindow):
         """Calculate Average True Range for volatility estimation"""
         if self.current_data is None or len(self.current_data) < period:
             return 50.0  # Default ATR
+        return self._calculate_atr_from_data(self.current_data, period)
+    
+    @staticmethod
+    def _calculate_atr_from_data(data, period: int = 14) -> float:
+        """Calculate ATR from any DataFrame"""
+        if data is None or len(data) < period:
+            return 50.0
         
         try:
-            df = self.current_data.copy()
+            df = data.copy()
             
             # Calculate True Range
             df['H-L'] = df['High'] - df['Low']
@@ -1210,6 +1697,23 @@ class TradingMainWindow(QMainWindow):
                 option_data = self.get_gold_option_data(
                     signal_type=signal_type,
                     spot_price=self.gold_spot_price,
+                    atr=atr
+                )
+                if option_data:
+                    signal_info['entry_price'] = option_data['premium']
+                    signal_info['stop_loss'] = option_data['stop_loss']
+                    signal_info['target'] = option_data['target']
+                    signal_info['strike'] = option_data['strike']
+                    signal_info['option_type'] = option_data['option_type']
+                    signal_info['spot_price'] = option_data['spot_price']
+                    
+                    # Cache this premium for position updates
+                    self._premium_cache[(option_data['strike'], option_data['option_type'])] = option_data['premium']
+            
+            elif self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+                option_data = self.get_crude_option_data(
+                    signal_type=signal_type,
+                    spot_price=self.crude_spot_price,
                     atr=atr
                 )
                 if option_data:
@@ -1292,6 +1796,13 @@ class TradingMainWindow(QMainWindow):
                     trade.option_type,
                     self.gold_spot_price
                 )
+        elif self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+            if hasattr(trade, 'strike') and trade.strike > 0 and hasattr(trade, 'option_type'):
+                exit_price = self.get_crude_option_ltp(
+                    trade.strike,
+                    trade.option_type,
+                    self.crude_spot_price
+                )
         
         # Calculate potential P&L
         # For option trades (both CALL/PUT), we BUY the option - always long
@@ -1350,6 +1861,14 @@ class TradingMainWindow(QMainWindow):
         spot_price = signal_info.get('spot_price', self.current_price)
         entry_price = signal_info.get('entry_price', self.current_price)
         
+        # Get user-configured target points and compute SL/Target
+        target_points = self.target_points_spin.value()
+        sl_points = target_points / 2.0  # SL is 50% of target
+        
+        # Override SL and Target with user-configured points
+        signal_info['target'] = entry_price + target_points
+        signal_info['stop_loss'] = entry_price - sl_points
+        
         # Safety check: For option trades, entry_price should be the option premium, not spot price
         # NIFTY premiums are typically 50-500, spot is ~25000. GOLD premiums are ~1000-5000, spot is ~85000
         if strike > 0 and option_type:
@@ -1358,6 +1877,8 @@ class TradingMainWindow(QMainWindow):
                 is_suspicious = True  # NIFTY premium > 1000 likely means spot leaked in
             elif self.current_instrument == 'GOLD' and entry_price > 20000:
                 is_suspicious = True  # GOLD premium > 20000 likely means spot leaked in
+            elif self.current_instrument == 'CRUDE OIL' and entry_price > 1000:
+                is_suspicious = True  # CRUDE premium > 1000 likely means spot leaked in
             
             if is_suspicious:
                 print(f"[WARNING] Entry price {entry_price:.2f} looks like spot price, not option premium!")
@@ -1370,13 +1891,16 @@ class TradingMainWindow(QMainWindow):
                         entry_price = self.option_fetcher.get_option_ltp(strike, option_type, self.current_price, atr)
                 elif self.current_instrument == 'GOLD':
                     entry_price = self.get_gold_option_ltp(strike, option_type, self.gold_spot_price, atr)
-                signal_info['stop_loss'] = entry_price * 0.70  # 30% loss
-                signal_info['target'] = entry_price * 1.50     # 50% profit
+                elif self.current_instrument == 'CRUDE OIL':
+                    entry_price = self.get_crude_option_ltp(strike, option_type, self.crude_spot_price, atr)
+                # Recompute SL/Target with corrected entry price
+                signal_info['target'] = entry_price + target_points
+                signal_info['stop_loss'] = entry_price - sl_points
                 print(f"[FIXED] Using premium: {entry_price:.2f}, SL: {signal_info['stop_loss']:.2f}, Target: {signal_info['target']:.2f}")
         
         # Get instrument-specific lot size
         lot_size = self.INSTRUMENTS[self.current_instrument].get('lot_size', 65)
-        instrument_prefix = 'NIFTY' if self.current_instrument == 'NIFTY 50' else self.current_instrument
+        instrument_prefix = 'NIFTY' if self.current_instrument == 'NIFTY 50' else ('CRUDEOIL' if self.current_instrument == 'CRUDE OIL' else self.current_instrument)
         
         # Execute trade with all option parameters
         trade = engine.open_position(
@@ -1389,7 +1913,8 @@ class TradingMainWindow(QMainWindow):
             notes=signal_info.get('reason', ''),
             strike=strike,
             option_type=option_type,
-            spot_price=spot_price
+            spot_price=spot_price,
+            target_points=target_points
         )
             
         if trade:
@@ -1540,31 +2065,73 @@ class TradingMainWindow(QMainWindow):
         """Called by background thread when Gold spot price is updated"""
         self.gold_spot_price = spot_price
     
+    def _on_crude_spot_updated(self, spot_price):
+        """Called by background thread when Crude Oil spot price is updated"""
+        self.crude_spot_price = spot_price
+    
     def _sync_positions_to_premium_thread(self):
-        """Tell the background thread which positions need premium updates"""
-        positions = []
-        for strategy_name in self.strategies.keys():
-            engine_key = f"{self.current_instrument}_{strategy_name}"
-            engine = self.trading_engines.get(engine_key)
-            if engine:
-                for pos in engine.open_positions:
-                    if hasattr(pos, 'strike') and pos.strike > 0 and hasattr(pos, 'option_type'):
-                        key = (pos.strike, pos.option_type)
-                        if key not in positions:
-                            positions.append(key)
+        """Tell the background thread which positions need premium updates across ALL instruments"""
+        positions_by_instrument = {}
         
-        self.premium_thread.set_positions(
-            positions,
-            self.current_instrument,
-            self.current_price,
-            self.calculate_atr()
-        )
+        for instrument_name in self.INSTRUMENTS.keys():
+            # Track current instrument + auto-trade instruments
+            is_current = (instrument_name == self.current_instrument)
+            is_auto_traded = (self.auto_trade_btn.isChecked() and 
+                            instrument_name in self.auto_trade_instruments)
+            
+            if not is_current and not is_auto_traded:
+                continue
+            
+            positions = []
+            for strategy_name in self.strategies.keys():
+                engine_key = f"{instrument_name}_{strategy_name}"
+                engine = self.trading_engines.get(engine_key)
+                if engine:
+                    for pos in engine.open_positions:
+                        if hasattr(pos, 'strike') and pos.strike > 0 and hasattr(pos, 'option_type'):
+                            key = (pos.strike, pos.option_type)
+                            if key not in positions:
+                                positions.append(key)
+            
+            # Get price and ATR for this instrument
+            if is_current:
+                if instrument_name == 'GOLD' and self.gold_spot_price > 0:
+                    price = self.gold_spot_price
+                elif instrument_name == 'CRUDE OIL' and self.crude_spot_price > 0:
+                    price = self.crude_spot_price
+                else:
+                    price = self.current_price
+                atr = self.calculate_atr()
+            else:
+                # Background instrument - use auto_trade data
+                data = self.auto_trade_data.get(instrument_name)
+                if data is not None and not data.empty:
+                    price = data['Close'].iloc[-1].item()
+                    atr = self._calculate_atr_from_data(data)
+                else:
+                    price = self.auto_trade_prices.get(instrument_name, 0)
+                    atr = 50.0
+                # Use MCX spot for Gold/Crude
+                if instrument_name == 'GOLD' and self.gold_spot_price > 0:
+                    price = self.gold_spot_price
+                elif instrument_name == 'CRUDE OIL' and self.crude_spot_price > 0:
+                    price = self.crude_spot_price
+            
+            positions_by_instrument[instrument_name] = {
+                'positions': positions,
+                'price': price,
+                'atr': atr
+            }
+        
+        self.premium_thread.set_all_positions(positions_by_instrument)
     
     def update_ui(self):
         """Update UI elements periodically - NO API calls, reads from cache only"""
         # Update price display
         if self.current_instrument == 'GOLD' and self.gold_spot_price > 0:
             self.price_label.setText(f"MCX Gold: ₹{self.gold_spot_price:,.1f}")
+        elif self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+            self.price_label.setText(f"MCX Crude: ₹{self.crude_spot_price:,.1f}")
         elif self.current_price > 0:
             self.price_label.setText(f"Price: ₹{self.current_price:.2f}")
         
@@ -1572,13 +2139,13 @@ class TradingMainWindow(QMainWindow):
         self._sync_positions_to_premium_thread()
         
         # Update positions using CACHED premiums (no API calls here)
-        price_available = self.current_price > 0 or (self.current_instrument == 'GOLD' and self.gold_spot_price > 0)
+        price_available = self.current_price > 0 or (self.current_instrument == 'GOLD' and self.gold_spot_price > 0) or (self.current_instrument == 'CRUDE OIL' and self.crude_spot_price > 0)
         if price_available:
             for strategy_name in self.strategies.keys():
                 engine_key = f"{self.current_instrument}_{strategy_name}"
                 engine = self.trading_engines.get(engine_key)
                 if engine:
-                    if self.current_instrument in ('NIFTY 50', 'GOLD'):
+                    if self.current_instrument in ('NIFTY 50', 'GOLD', 'CRUDE OIL'):
                         # Update each position individually with its own premium
                         positions_to_close = []
                         for position in engine.open_positions:
@@ -1592,7 +2159,7 @@ class TradingMainWindow(QMainWindow):
                                         positions_to_close.append(position)
                                 # else: skip update until background thread fetches it
                             else:
-                                price = self.gold_spot_price if self.current_instrument == 'GOLD' else self.current_price
+                                price = self.gold_spot_price if self.current_instrument == 'GOLD' else (self.crude_spot_price if self.current_instrument == 'CRUDE OIL' else self.current_price)
                                 if price > 0:
                                     position.update_current_price(price)
                                     if position.check_exit_conditions(price):
@@ -1608,11 +2175,14 @@ class TradingMainWindow(QMainWindow):
                     else:
                         engine.update_positions(self.current_price)
                     
-                    # Update trade table if any position closed
+                    # Update trade table if any position changed
                     prev_key = f'_prev_positions_{engine_key}'
-                    if len(engine.open_positions) != getattr(self, prev_key, 0):
+                    prev_count = getattr(self, prev_key, -1)
+                    current_count = len(engine.open_positions) + len(engine.closed_trades)
+                    has_open = len(engine.open_positions) > 0
+                    if current_count != prev_count or has_open:
                         self.update_trade_table(strategy_name)
-                        setattr(self, prev_key, len(engine.open_positions))
+                        setattr(self, prev_key, current_count)
         
         # Update portfolio display for current strategy and instrument
         engine_key = f"{self.current_instrument}_{self.current_strategy}"
@@ -1684,8 +2254,17 @@ class TradingMainWindow(QMainWindow):
                 current_text = "-"
             table.setItem(i, 4, QTableWidgetItem(current_text))
             
-            # Column 5: Stop Loss
-            table.setItem(i, 5, QTableWidgetItem(f"₹{trade.stop_loss:.2f}"))
+            # Column 5: Stop Loss (with trailing SL stage indicator)
+            sl_text = f"₹{trade.stop_loss:.2f}"
+            if hasattr(trade, 'trailing_sl_stage') and trade.status == 'OPEN':
+                if trade.trailing_sl_stage == 'STAGE_50':
+                    sl_text += " ⬆50%"
+                elif trade.trailing_sl_stage == 'STAGE_75':
+                    sl_text += " ⬆75%"
+            sl_item = QTableWidgetItem(sl_text)
+            if hasattr(trade, 'trailing_sl_stage') and trade.trailing_sl_stage != 'INITIAL':
+                sl_item.setForeground(QColor('blue'))
+            table.setItem(i, 5, sl_item)
             
             # Column 6: Target
             table.setItem(i, 6, QTableWidgetItem(f"₹{trade.target:.2f}"))
@@ -1730,54 +2309,283 @@ class TradingMainWindow(QMainWindow):
         self.strategy_info_text.setHtml(info)
     
     def toggle_auto_trade(self, checked):
-        """Toggle auto-trading"""
+        """Toggle auto-trading across all selected instruments"""
         if checked:
-            # Show strategy selection dialog
-            dialog = StrategySelectionDialog(
-                list(self.strategies.keys()),
-                self.selected_auto_trade_strategies,
-                self
+            # Show multi-instrument auto-trade configuration dialog
+            dialog = AutoTradeConfigDialog(
+                strategies=list(self.strategies.keys()),
+                instruments=list(self.INSTRUMENTS.keys()),
+                selected_strategies=self.selected_auto_trade_strategies,
+                selected_instruments=self.auto_trade_instruments,
+                target_points=self.auto_trade_target_points,
+                parent=self
             )
             
             if dialog.exec_() == QDialog.Accepted:
-                selected = dialog.get_selected_strategies()
+                selected_strategies = dialog.get_selected_strategies()
+                selected_instruments = dialog.get_selected_instruments()
+                target_points = dialog.get_target_points()
                 
-                # Check if at least one strategy is selected
-                if not selected:
-                    QMessageBox.warning(
-                        self,
-                        "No Strategies Selected",
-                        "Please select at least one strategy for auto trading."
-                    )
+                # Validate selections
+                if not selected_strategies:
+                    QMessageBox.warning(self, "No Strategies", 
+                                       "Please select at least one strategy.")
+                    self.auto_trade_btn.setChecked(False)
+                    return
+                if not selected_instruments:
+                    QMessageBox.warning(self, "No Instruments",
+                                       "Please select at least one instrument.")
                     self.auto_trade_btn.setChecked(False)
                     return
                 
-                # Update selected strategies
-                self.selected_auto_trade_strategies = selected
-                print(f"[AUTO-TRADE CONFIG] Selected strategies: {self.selected_auto_trade_strategies}")
+                # Store config
+                self.selected_auto_trade_strategies = selected_strategies
+                self.auto_trade_instruments = selected_instruments
+                self.auto_trade_target_points = target_points
                 
-                # Update button appearance
+                # Start background data threads for non-current instruments
+                self._start_auto_trade_threads()
+                
+                # Update button
                 self.auto_trade_btn.setText("Disable Auto-Trade")
                 self.auto_trade_btn.setStyleSheet("background-color: green; color: white;")
                 
-                # Show confirmation message
-                strategy_list = "\n• ".join(selected)
+                # Log config
+                print(f"\n{'='*60}")
+                print(f"   AUTO-TRADE ENABLED")
+                print(f"{'='*60}")
+                for inst in selected_instruments:
+                    tp = target_points.get(inst, 10)
+                    print(f"  {inst}: Target={tp} pts, SL={tp/2:.0f} pts")
+                print(f"  Strategies: {', '.join(selected_strategies)}")
+                print(f"{'='*60}\n")
+                
+                # Confirmation
+                inst_details = "\n".join(
+                    f"  {inst}: Target={target_points.get(inst, 10)} pts"
+                    for inst in selected_instruments
+                )
                 QMessageBox.information(
                     self,
                     "Auto Trading Enabled",
-                    f"Auto trading enabled for:\n\n• {strategy_list}"
+                    f"Auto trading enabled for:\n\n{inst_details}\n\n"
+                    f"Strategies: {len(selected_strategies)} selected"
                 )
             else:
-                # User cancelled, uncheck the button
                 self.auto_trade_btn.setChecked(False)
         else:
+            # Stop background threads
+            self._stop_auto_trade_threads()
+            
             self.auto_trade_btn.setText("Enable Auto-Trade")
             self.auto_trade_btn.setStyleSheet("")
-            QMessageBox.information(
-                self,
-                "Auto Trading Disabled",
-                "Auto trading has been disabled."
+            QMessageBox.information(self, "Auto Trading Disabled",
+                                   "Auto trading has been disabled.")
+    
+    def _start_auto_trade_threads(self):
+        """Start background data threads for auto-trade instruments (non-current)"""
+        self._stop_auto_trade_threads()  # Clean up existing
+        
+        for inst_name in self.auto_trade_instruments:
+            if inst_name == self.current_instrument:
+                continue  # Main data_thread handles the current instrument
+            
+            config = self.INSTRUMENTS[inst_name]
+            thread = LiveDataThread(
+                symbol=config['symbol'],
+                interval=config['interval']
             )
+            # Connect with instrument name captured via default arg
+            thread.data_ready.connect(
+                lambda df, inst=inst_name: self._on_auto_trade_data(inst, df)
+            )
+            thread.start()
+            self.auto_trade_threads[inst_name] = thread
+            print(f"[AUTO-TRADE] Started background data thread for {inst_name}")
+    
+    def _stop_auto_trade_threads(self):
+        """Stop all background auto-trade threads"""
+        for inst_name, thread in self.auto_trade_threads.items():
+            thread.stop()
+            thread.wait(2000)
+            print(f"[AUTO-TRADE] Stopped background thread for {inst_name}")
+        self.auto_trade_threads.clear()
+        self.auto_trade_data.clear()
+        self.auto_trade_prices.clear()
+    
+    def _on_auto_trade_data(self, instrument, df):
+        """Handle data from background auto-trade thread for a specific instrument"""
+        if df.empty or not self.auto_trade_btn.isChecked():
+            return
+        
+        self.auto_trade_data[instrument] = df
+        price = df['Close'].iloc[-1].item()
+        self.auto_trade_prices[instrument] = price
+        
+        # Run auto-trade signal check for this background instrument
+        self._check_auto_trade_signals(instrument, df, price)
+        
+        # Update positions for this background instrument
+        self._update_background_positions(instrument)
+    
+    def _check_auto_trade_signals(self, instrument, data, current_price):
+        """Check signals and execute auto-trades for a background instrument"""
+        if not self.auto_trade_btn.isChecked():
+            return
+        if instrument not in self.auto_trade_instruments:
+            return
+        
+        atr = self._calculate_atr_from_data(data)
+        target_points = self.auto_trade_target_points.get(instrument, 10)
+        _option_data_cache = {}
+        
+        for strategy_name, strategy in self.strategies.items():
+            if strategy_name not in self.selected_auto_trade_strategies:
+                continue
+            
+            signal_info = strategy.get_signal(data.copy())
+            if not signal_info:
+                continue
+            
+            signal_type = signal_info['signal']
+            
+            # Fetch option data (cached per signal_type to avoid duplicate API calls)
+            option_data = None
+            if signal_type in _option_data_cache:
+                option_data = _option_data_cache[signal_type]
+            else:
+                if instrument == 'NIFTY 50':
+                    if self.nifty_option_fetcher and self.nifty_options_cache:
+                        option_data = self.nifty_option_fetcher.get_option_data(
+                            signal_type=signal_type, spot_price=current_price, atr=atr
+                        )
+                    elif self.option_fetcher:
+                        option_data = self.option_fetcher.get_option_data(
+                            signal_type=signal_type, spot_price=current_price, atr=atr
+                        )
+                elif instrument == 'GOLD' and self.gold_spot_price > 0:
+                    option_data = self.get_gold_option_data(
+                        signal_type=signal_type, spot_price=self.gold_spot_price, atr=atr
+                    )
+                elif instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+                    option_data = self.get_crude_option_data(
+                        signal_type=signal_type, spot_price=self.crude_spot_price, atr=atr
+                    )
+                _option_data_cache[signal_type] = option_data
+            
+            if option_data:
+                entry_price = option_data['premium']
+                signal_info['entry_price'] = entry_price
+                signal_info['stop_loss'] = option_data['stop_loss']
+                signal_info['target'] = option_data['target']
+                signal_info['strike'] = option_data['strike']
+                signal_info['option_type'] = option_data['option_type']
+                signal_info['spot_price'] = option_data['spot_price']
+                self._premium_cache[(option_data['strike'], option_data['option_type'])] = entry_price
+            else:
+                entry_price = signal_info.get('entry_price', current_price)
+            
+            # Execute auto-trade if no open position
+            engine_key = f"{instrument}_{strategy_name}"
+            engine = self.trading_engines.get(engine_key)
+            if engine and len(engine.open_positions) == 0:
+                print(f"[AUTO-TRADE] {instrument} | {strategy_name} | {signal_type}")
+                self._execute_auto_trade_for_instrument(
+                    instrument, signal_info, strategy_name, target_points
+                )
+    
+    def _execute_auto_trade_for_instrument(self, instrument, signal_info, strategy_name, target_points):
+        """Execute an auto-trade for a specific (possibly background) instrument"""
+        engine_key = f"{instrument}_{strategy_name}"
+        engine = self.trading_engines.get(engine_key)
+        if not engine:
+            return
+        
+        strike = signal_info.get('strike', 0)
+        option_type = signal_info.get('option_type', '')
+        spot_price = signal_info.get('spot_price', 0)
+        entry_price = signal_info.get('entry_price', 0)
+        
+        if entry_price <= 0:
+            return
+        
+        # Compute SL/Target with instrument-specific target points
+        sl_points = target_points / 2.0
+        signal_info['target'] = entry_price + target_points
+        signal_info['stop_loss'] = entry_price - sl_points
+        
+        lot_size = self.INSTRUMENTS[instrument].get('lot_size', 65)
+        instrument_prefix = 'NIFTY' if instrument == 'NIFTY 50' else (
+            'CRUDEOIL' if instrument == 'CRUDE OIL' else instrument)
+        
+        trade = engine.open_position(
+            signal_type=signal_info['signal'],
+            entry_price=entry_price,
+            stop_loss=signal_info.get('stop_loss', 0),
+            target=signal_info.get('target', 0),
+            quantity=lot_size,
+            strategy=strategy_name,
+            notes=signal_info.get('reason', ''),
+            strike=strike,
+            option_type=option_type,
+            spot_price=spot_price,
+            target_points=target_points
+        )
+        
+        if trade:
+            # Update trade table if this is the currently viewed instrument
+            if instrument == self.current_instrument:
+                self.update_trade_table(strategy_name)
+            
+            if strike > 0 and option_type:
+                print(f"[AUTO-TRADE] {instrument} | {strategy_name}: {trade.signal_type}")
+                print(f"  Option: {instrument_prefix} {strike} {option_type}")
+                print(f"  Spot: Rs.{spot_price:,.2f}")
+                print(f"  Premium: Rs.{entry_price:.2f} | Total: Rs.{entry_price * lot_size:,.2f}")
+                print(f"  SL: Rs.{trade.stop_loss:.2f} | Target: Rs.{trade.target:.2f}")
+            else:
+                print(f"[AUTO-TRADE] {instrument} | {strategy_name}: {trade.signal_type} @ Rs.{trade.entry_price:.2f}")
+    
+    def _update_background_positions(self, instrument):
+        """Update positions for a background auto-trade instrument (SL/Target check)"""
+        # Get the right spot price for MCX instruments
+        if instrument == 'GOLD' and self.gold_spot_price > 0:
+            spot_price = self.gold_spot_price
+        elif instrument == 'CRUDE OIL' and self.crude_spot_price > 0:
+            spot_price = self.crude_spot_price
+        else:
+            spot_price = self.auto_trade_prices.get(instrument, 0)
+        
+        if spot_price <= 0:
+            return
+        
+        for strategy_name in self.strategies.keys():
+            engine_key = f"{instrument}_{strategy_name}"
+            engine = self.trading_engines.get(engine_key)
+            if not engine or not engine.open_positions:
+                continue
+            
+            positions_to_close = []
+            for position in engine.open_positions:
+                if hasattr(position, 'strike') and position.strike > 0:
+                    # Use cached premium if available
+                    key = (position.strike, position.option_type)
+                    cached_premium = self._premium_cache.get(key)
+                    if cached_premium and cached_premium > 0:
+                        position.update_current_price(cached_premium)
+                        if position.check_exit_conditions(cached_premium):
+                            positions_to_close.append(position)
+                else:
+                    position.update_current_price(spot_price)
+                    if position.check_exit_conditions(spot_price):
+                        positions_to_close.append(position)
+            
+            for trade in positions_to_close:
+                margin = trade.entry_price * trade.quantity * 0.20
+                engine.capital += margin + trade.pnl
+                engine.open_positions.remove(trade)
+                engine.closed_trades.append(trade)
+                print(f"[AUTO-CLOSE] {instrument} | {trade.trade_id} - {trade.status} - P&L: Rs.{trade.pnl:,.2f}")
     
     def save_all_trades(self):
         """Save all trades to JSON files for each instrument-strategy combination"""
@@ -1785,7 +2593,7 @@ class TradingMainWindow(QMainWindow):
             # Parse instrument and strategy from key format: "INSTRUMENT_STRATEGY"
             parts = engine_key.split('_', 1)
             instrument = parts[0].lower().replace(' ', '_')
-            strategy = parts[1].lower().replace(' ', '_').replace('+', '')
+            strategy = parts[1].lower().replace(' ', '_').replace('+', '').replace('/', '_').replace('-', '_').replace('(', '').replace(')', '')
             filename = f"trades_{instrument}_{strategy}.json"
             engine.save_trades(filename)
         
@@ -1797,7 +2605,7 @@ class TradingMainWindow(QMainWindow):
             # Parse instrument and strategy from key format: "INSTRUMENT_STRATEGY"
             parts = engine_key.split('_', 1)
             instrument = parts[0].lower().replace(' ', '_')
-            strategy = parts[1].lower().replace(' ', '_').replace('+', '')
+            strategy = parts[1].lower().replace(' ', '_').replace('+', '').replace('/', '_').replace('-', '_').replace('(', '').replace(')', '')
             filename = f"trades_{instrument}_{strategy}.json"
             try:
                 engine.load_trades(filename)
@@ -1873,6 +2681,10 @@ class TradingMainWindow(QMainWindow):
             self.premium_thread.stop()
             self.premium_thread.quit()
             self.premium_thread.wait(2000)
+        
+        # Stop auto-trade background threads
+        if hasattr(self, 'auto_trade_threads'):
+            self._stop_auto_trade_threads()
         
         # Stop data thread
         if hasattr(self, 'data_thread'):

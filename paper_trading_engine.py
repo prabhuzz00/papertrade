@@ -34,6 +34,11 @@ class Trade:
     pnl: Optional[float] = None
     current_price: float = 0
     
+    # Trailing stop loss fields
+    initial_stop_loss: float = 0  # Original SL at trade entry
+    target_points: float = 0  # Target in points (user-configured)
+    trailing_sl_stage: str = "INITIAL"  # INITIAL, STAGE_50, STAGE_75
+    
     def update_current_price(self, price: float):
         """Update current market price and unrealized P&L"""
         self.current_price = price
@@ -52,10 +57,47 @@ class Trade:
                 else:  # PUT (short)
                     self.pnl = (self.entry_price - price) * self.quantity
     
+    def _apply_trailing_stop_loss(self, current_price: float):
+        """Apply trailing stop loss based on price movement towards target.
+        
+        Trailing SL rules (for long/option positions):
+        - When price hits 50% of target points → move SL to entry_price + 1
+        - When price hits 75% of target points → move SL to entry_price + 50% of target_points
+        """
+        if self.target_points <= 0:
+            return  # No trailing SL if target_points not set
+        
+        # Calculate price thresholds
+        price_50pct = self.entry_price + (self.target_points * 0.50)
+        price_75pct = self.entry_price + (self.target_points * 0.75)
+        
+        # Check stages in order (highest first so we don't skip)
+        if self.trailing_sl_stage != "STAGE_75" and current_price >= price_75pct:
+            # 75% of target reached → SL moves to entry + 50% of target_points
+            new_sl = self.entry_price + (self.target_points * 0.50)
+            if new_sl > self.stop_loss:
+                old_sl = self.stop_loss
+                self.stop_loss = new_sl
+                self.trailing_sl_stage = "STAGE_75"
+                print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 75% target → "
+                      f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+        elif self.trailing_sl_stage == "INITIAL" and current_price >= price_50pct:
+            # 50% of target reached → SL moves to entry + 1
+            new_sl = self.entry_price + 1
+            if new_sl > self.stop_loss:
+                old_sl = self.stop_loss
+                self.stop_loss = new_sl
+                self.trailing_sl_stage = "STAGE_50"
+                print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 50% target → "
+                      f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+    
     def check_exit_conditions(self, current_price: float) -> bool:
-        """Check if stop loss or target hit"""
+        """Check if stop loss or target hit, and apply trailing stop loss"""
         if self.status != "OPEN":
             return False
+        
+        # Apply trailing stop loss adjustment BEFORE checking exit
+        self._apply_trailing_stop_loss(current_price)
         
         # For option trades (both CALL/PUT), we BUY the option
         # SL triggers when premium drops below stop_loss
@@ -119,6 +161,10 @@ class Trade:
         data['entry_time'] = datetime.fromisoformat(data['entry_time'])
         if data.get('exit_time'):
             data['exit_time'] = datetime.fromisoformat(data['exit_time'])
+        # Backward compatibility: add trailing SL fields if missing
+        data.setdefault('initial_stop_loss', data.get('stop_loss', 0))
+        data.setdefault('target_points', 0)
+        data.setdefault('trailing_sl_stage', 'INITIAL')
         return Trade(**data)
 
 
@@ -137,7 +183,8 @@ class PaperTradingEngine:
     def open_position(self, signal_type: str, entry_price: float, 
                      stop_loss: float, target: float, quantity: int,
                      strategy: str, notes: str = "",
-                     strike: int = 0, option_type: str = "", spot_price: float = 0) -> Optional[Trade]:
+                     strike: int = 0, option_type: str = "", spot_price: float = 0,
+                     target_points: float = 0) -> Optional[Trade]:
         """
         Open a new position
         
@@ -152,6 +199,7 @@ class PaperTradingEngine:
             strike: Option strike price
             option_type: 'CE' or 'PE'
             spot_price: Spot price at entry
+            target_points: Target in points from entry (for trailing SL)
         
         Returns:
             Trade object if successful, None otherwise
@@ -177,7 +225,10 @@ class PaperTradingEngine:
             notes=notes,
             strike=strike,
             option_type=option_type,
-            spot_price=spot_price
+            spot_price=spot_price,
+            initial_stop_loss=stop_loss,
+            target_points=target_points,
+            trailing_sl_stage="INITIAL"
         )
         
         # Deduct margin
