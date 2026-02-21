@@ -48,7 +48,10 @@ from strategy_wrappers import (BollingerMACDStrategy,
                                PremiumDiscountStrategy,
                                MSSStrategy,
                                VWAPReversalStrategy,
-                               MultiTimeframeConfluenceStrategy)
+                               MultiTimeframeConfluenceStrategy,
+                               OptionBuySellStrategy,
+                               ShortVolGridStrategy,
+                               VolumeBreakoutStrategy)
 from paper_trading_engine import PaperTradingEngine, Trade
 from option_price_fetcher import OptionPriceFetcher
 from fetch_gold_atm_options import GoldATMOptionFetcher
@@ -741,7 +744,10 @@ class TradingMainWindow(QMainWindow):
             'Premium/Discount Zone': PremiumDiscountStrategy(),
             'Market Structure Shift': MSSStrategy(),
             'VWAP Reversal': VWAPReversalStrategy(),
-            'Multi-TF Confluence': MultiTimeframeConfluenceStrategy()
+            'Multi-TF Confluence': MultiTimeframeConfluenceStrategy(),
+            'Option Buy/Sell': OptionBuySellStrategy(),
+            'Short Vol Grid': ShortVolGridStrategy(),
+            'Volume Breakout': VolumeBreakoutStrategy()
         }
         
         self.current_strategy = 'Bollinger + MACD'
@@ -1269,9 +1275,9 @@ class TradingMainWindow(QMainWindow):
         
         for strategy_name in self.strategies.keys():
             table = QTableWidget()
-            table.setColumnCount(11)
+            table.setColumnCount(12)
             table.setHorizontalHeaderLabels([
-                'Time', 'Signal', 'Strike/Type', 'Premium (Entry)', 'Current', 'SL', 'Target', 
+                'Time', 'Action', 'Signal', 'Strike/Type', 'Premium (Entry)', 'Current', 'SL', 'Target', 
                 'P&L', 'Status', 'Duration', 'Notes'
             ])
             table.horizontalHeader().setStretchLastSection(True)
@@ -1562,16 +1568,26 @@ class TradingMainWindow(QMainWindow):
                     # Compute SL/Target from user-configured target points for display
                     target_points = self.target_points_spin.value()
                     sl_points = target_points / 2.0
-                    display_target = entry_price + target_points
-                    display_sl = entry_price - sl_points
+                    display_order_action = signal_info.get('order_action', 'BUY')
+                    if display_order_action == 'SELL':
+                        display_target = entry_price - target_points  # Premium drops = profit
+                        display_sl = entry_price + sl_points           # Premium rises = loss
+                    else:
+                        display_target = entry_price + target_points
+                        display_sl = entry_price - sl_points
                     
                     # Update signal display
-                    color = 'green' if signal_type == 'CALL' else 'red' if signal_type == 'PUT' else 'gray'
-                    self.signal_label.setText(f"[SIGNAL] {signal_type}")
+                    if display_order_action == 'SELL':
+                        color = '#b03030' if signal_type == 'CALL' else '#b03030'
+                        self.signal_label.setText(f"[SIGNAL] SELL {signal_type}")
+                    else:
+                        color = 'green' if signal_type == 'CALL' else 'red' if signal_type == 'PUT' else 'gray'
+                        self.signal_label.setText(f"[SIGNAL] BUY {signal_type}")
                     self.signal_label.setStyleSheet(f"background-color: {color}; color: white; padding: 10px; border-radius: 5px;")
                     
                     # Build details display
                     details = f"""<b>Strategy:</b> {strategy_name}<br>
+<b>Action:</b> {display_order_action}<br>
 <b>Signal Type:</b> {signal_type}<br>
 <b>Confidence:</b> {confidence:.1%}<br>"""
                     
@@ -1805,9 +1821,14 @@ class TradingMainWindow(QMainWindow):
                 )
         
         # Calculate potential P&L
-        # For option trades (both CALL/PUT), we BUY the option - always long
+        trade_order_action = getattr(trade, 'order_action', 'BUY')
         if hasattr(trade, 'strike') and trade.strike > 0 and trade.option_type:
-            potential_pnl = (exit_price - trade.entry_price) * trade.quantity
+            if trade_order_action == 'SELL':
+                # Short option: profit when premium falls
+                potential_pnl = (trade.entry_price - exit_price) * trade.quantity
+            else:
+                # Long option (BUY): profit when premium rises
+                potential_pnl = (exit_price - trade.entry_price) * trade.quantity
         else:
             # Spot/futures trade - directional
             potential_pnl = (exit_price - trade.entry_price) * trade.quantity
@@ -1818,7 +1839,7 @@ class TradingMainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, 
             "Confirm Exit", 
-            f"Exit {trade.signal_type} trade at ₹{exit_price:.2f}?\n\n"
+            f"Exit {trade_order_action} {trade.signal_type} trade at ₹{exit_price:.2f}?\n\n"
             f"Entry: ₹{trade.entry_price:.2f}\n"
             f"Potential P&L: ₹{potential_pnl:,.2f}",
             QMessageBox.Yes | QMessageBox.No
@@ -1866,8 +1887,14 @@ class TradingMainWindow(QMainWindow):
         sl_points = target_points / 2.0  # SL is 50% of target
         
         # Override SL and Target with user-configured points
-        signal_info['target'] = entry_price + target_points
-        signal_info['stop_loss'] = entry_price - sl_points
+        # For SELL orders, target is BELOW entry (premium decay), SL is ABOVE entry
+        order_action = signal_info.get('order_action', 'BUY')
+        if order_action == 'SELL':
+            signal_info['target'] = entry_price - target_points  # Premium drops = profit
+            signal_info['stop_loss'] = entry_price + sl_points   # Premium rises = loss
+        else:
+            signal_info['target'] = entry_price + target_points
+            signal_info['stop_loss'] = entry_price - sl_points
         
         # Safety check: For option trades, entry_price should be the option premium, not spot price
         # NIFTY premiums are typically 50-500, spot is ~25000. GOLD premiums are ~1000-5000, spot is ~85000
@@ -1894,8 +1921,12 @@ class TradingMainWindow(QMainWindow):
                 elif self.current_instrument == 'CRUDE OIL':
                     entry_price = self.get_crude_option_ltp(strike, option_type, self.crude_spot_price, atr)
                 # Recompute SL/Target with corrected entry price
-                signal_info['target'] = entry_price + target_points
-                signal_info['stop_loss'] = entry_price - sl_points
+                if order_action == 'SELL':
+                    signal_info['target'] = entry_price - target_points
+                    signal_info['stop_loss'] = entry_price + sl_points
+                else:
+                    signal_info['target'] = entry_price + target_points
+                    signal_info['stop_loss'] = entry_price - sl_points
                 print(f"[FIXED] Using premium: {entry_price:.2f}, SL: {signal_info['stop_loss']:.2f}, Target: {signal_info['target']:.2f}")
         
         # Get instrument-specific lot size
@@ -1914,7 +1945,8 @@ class TradingMainWindow(QMainWindow):
             strike=strike,
             option_type=option_type,
             spot_price=spot_price,
-            target_points=target_points
+            target_points=target_points,
+            order_action=order_action
         )
             
         if trade:
@@ -2227,34 +2259,45 @@ class TradingMainWindow(QMainWindow):
             # Column 0: Time
             table.setItem(i, 0, QTableWidgetItem(trade.entry_time.strftime('%Y-%m-%d %H:%M')))
             
-            # Column 1: Signal Type (CALL/PUT)
+            # Column 1: Action (BUY/SELL)
+            order_action = getattr(trade, 'order_action', 'BUY')
+            action_item = QTableWidgetItem(order_action)
+            if order_action == 'SELL':
+                action_item.setForeground(QColor('white'))
+                action_item.setBackground(QColor(180, 60, 60))  # Dark red bg
+            else:
+                action_item.setForeground(QColor('white'))
+                action_item.setBackground(QColor(60, 140, 60))  # Dark green bg
+            table.setItem(i, 1, action_item)
+            
+            # Column 2: Signal Type (CALL/PUT)
             signal_item = QTableWidgetItem(trade.signal_type)
             if trade.signal_type == 'CALL':
                 signal_item.setForeground(QColor('green'))
             else:
                 signal_item.setForeground(QColor('red'))
-            table.setItem(i, 1, signal_item)
+            table.setItem(i, 2, signal_item)
             
-            # Column 2: Strike/Type (Option details)
+            # Column 3: Strike/Type (Option details)
             if trade.strike > 0 and trade.option_type:
                 strike_text = f"{trade.strike} {trade.option_type}"
             else:
                 strike_text = "-"
-            table.setItem(i, 2, QTableWidgetItem(strike_text))
+            table.setItem(i, 3, QTableWidgetItem(strike_text))
             
-            # Column 3: Premium (Entry)
-            table.setItem(i, 3, QTableWidgetItem(f"₹{trade.entry_price:.2f}"))
+            # Column 4: Premium (Entry)
+            table.setItem(i, 4, QTableWidgetItem(f"₹{trade.entry_price:.2f}"))
             
-            # Column 4: Current/Exit Price
+            # Column 5: Current/Exit Price
             if trade.exit_price:
                 current_text = f"₹{trade.exit_price:.2f}"
             elif trade.current_price > 0:
                 current_text = f"₹{trade.current_price:.2f}"
             else:
                 current_text = "-"
-            table.setItem(i, 4, QTableWidgetItem(current_text))
+            table.setItem(i, 5, QTableWidgetItem(current_text))
             
-            # Column 5: Stop Loss (with trailing SL stage indicator)
+            # Column 6: Stop Loss (with trailing SL stage indicator)
             sl_text = f"₹{trade.stop_loss:.2f}"
             if hasattr(trade, 'trailing_sl_stage') and trade.status == 'OPEN':
                 if trade.trailing_sl_stage == 'STAGE_50':
@@ -2264,12 +2307,12 @@ class TradingMainWindow(QMainWindow):
             sl_item = QTableWidgetItem(sl_text)
             if hasattr(trade, 'trailing_sl_stage') and trade.trailing_sl_stage != 'INITIAL':
                 sl_item.setForeground(QColor('blue'))
-            table.setItem(i, 5, sl_item)
+            table.setItem(i, 6, sl_item)
             
-            # Column 6: Target
-            table.setItem(i, 6, QTableWidgetItem(f"₹{trade.target:.2f}"))
+            # Column 7: Target
+            table.setItem(i, 7, QTableWidgetItem(f"₹{trade.target:.2f}"))
             
-            # Column 7: P&L
+            # Column 8: P&L
             pnl = trade.pnl if trade.pnl else 0
             pnl_item = QTableWidgetItem(f"₹{pnl:,.2f}")
             if pnl > 0:
@@ -2278,9 +2321,9 @@ class TradingMainWindow(QMainWindow):
             elif pnl < 0:
                 pnl_item.setForeground(QColor('red'))
                 pnl_item.setBackground(QColor(255, 230, 230))  # Light red
-            table.setItem(i, 7, pnl_item)
+            table.setItem(i, 8, pnl_item)
             
-            # Column 8: Status
+            # Column 9: Status
             status = trade.status
             status_item = QTableWidgetItem(status)
             if status == 'OPEN':
@@ -2289,18 +2332,18 @@ class TradingMainWindow(QMainWindow):
                 status_item.setBackground(QColor('lightgreen'))
             elif status in ['STOP_LOSS', 'LOSS']:
                 status_item.setBackground(QColor('lightcoral'))
-            table.setItem(i, 8, status_item)
+            table.setItem(i, 9, status_item)
             
-            # Column 9: Duration
+            # Column 10: Duration
             duration = ""
             if trade.exit_time:
                 duration_seconds = (trade.exit_time - trade.entry_time).total_seconds()
                 duration = f"{int(duration_seconds // 60)} min"
-            table.setItem(i, 9, QTableWidgetItem(duration))
+            table.setItem(i, 10, QTableWidgetItem(duration))
             
-            # Column 10: Notes
+            # Column 11: Notes
             notes_text = trade.notes[:50] if trade.notes else ""
-            table.setItem(i, 10, QTableWidgetItem(notes_text))
+            table.setItem(i, 11, QTableWidgetItem(notes_text))
     
     def update_strategy_info(self):
         """Update strategy information display"""
@@ -2511,8 +2554,13 @@ class TradingMainWindow(QMainWindow):
         
         # Compute SL/Target with instrument-specific target points
         sl_points = target_points / 2.0
-        signal_info['target'] = entry_price + target_points
-        signal_info['stop_loss'] = entry_price - sl_points
+        auto_order_action = signal_info.get('order_action', 'BUY')
+        if auto_order_action == 'SELL':
+            signal_info['target'] = entry_price - target_points
+            signal_info['stop_loss'] = entry_price + sl_points
+        else:
+            signal_info['target'] = entry_price + target_points
+            signal_info['stop_loss'] = entry_price - sl_points
         
         lot_size = self.INSTRUMENTS[instrument].get('lot_size', 65)
         instrument_prefix = 'NIFTY' if instrument == 'NIFTY 50' else (
@@ -2529,7 +2577,8 @@ class TradingMainWindow(QMainWindow):
             strike=strike,
             option_type=option_type,
             spot_price=spot_price,
-            target_points=target_points
+            target_points=target_points,
+            order_action=auto_order_action
         )
         
         if trade:
@@ -2538,7 +2587,7 @@ class TradingMainWindow(QMainWindow):
                 self.update_trade_table(strategy_name)
             
             if strike > 0 and option_type:
-                print(f"[AUTO-TRADE] {instrument} | {strategy_name}: {trade.signal_type}")
+                print(f"[AUTO-TRADE] {instrument} | {strategy_name}: {auto_order_action} {trade.signal_type}")
                 print(f"  Option: {instrument_prefix} {strike} {option_type}")
                 print(f"  Spot: Rs.{spot_price:,.2f}")
                 print(f"  Premium: Rs.{entry_price:.2f} | Total: Rs.{entry_price * lot_size:,.2f}")
@@ -2581,7 +2630,11 @@ class TradingMainWindow(QMainWindow):
                         positions_to_close.append(position)
             
             for trade in positions_to_close:
-                margin = trade.entry_price * trade.quantity * 0.20
+                trade_action = getattr(trade, 'order_action', 'BUY')
+                if trade_action == 'SELL':
+                    margin = trade.entry_price * trade.quantity * 0.50
+                else:
+                    margin = trade.entry_price * trade.quantity * 0.20
                 engine.capital += margin + trade.pnl
                 engine.open_positions.remove(trade)
                 engine.closed_trades.append(trade)

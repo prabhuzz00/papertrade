@@ -35,6 +35,7 @@ class OptionTrade:
     strategy: str
     instrument_id: int  # XTS ExchangeInstrumentID
     expiry: str
+    order_action: str = "BUY"  # 'BUY' (long) or 'SELL' (short/write)
     
     exit_premium: Optional[float] = None
     exit_time: Optional[datetime] = None
@@ -47,21 +48,34 @@ class OptionTrade:
         self.current_premium = premium
         
         if self.status == "OPEN":
-            # Long option: profit when premium increases
-            self.pnl = (premium - self.entry_premium) * self.quantity
+            if self.order_action == "SELL":
+                # Short option: profit when premium decreases
+                self.pnl = (self.entry_premium - premium) * self.quantity
+            else:
+                # Long option (BUY): profit when premium increases
+                self.pnl = (premium - self.entry_premium) * self.quantity
     
     def check_exit_conditions(self, current_premium: float) -> bool:
         """Check if stop loss or target hit"""
         if self.status != "OPEN":
             return False
         
-        # Long option: exit when premium reaches target or hits SL
-        if current_premium >= self.target:
-            self.close_trade(current_premium, "TARGET")
-            return True
-        elif current_premium <= self.stop_loss:
-            self.close_trade(current_premium, "STOP_LOSS")
-            return True
+        if self.order_action == "SELL":
+            # Short option: target is BELOW entry (premium decay), SL is ABOVE
+            if current_premium <= self.target:
+                self.close_trade(current_premium, "TARGET")
+                return True
+            elif current_premium >= self.stop_loss:
+                self.close_trade(current_premium, "STOP_LOSS")
+                return True
+        else:
+            # Long option (BUY): target is ABOVE entry, SL is BELOW
+            if current_premium >= self.target:
+                self.close_trade(current_premium, "TARGET")
+                return True
+            elif current_premium <= self.stop_loss:
+                self.close_trade(current_premium, "STOP_LOSS")
+                return True
         
         return False
     
@@ -71,8 +85,12 @@ class OptionTrade:
         self.exit_time = datetime.now()
         self.status = status
         
-        # Calculate P&L (always long options)
-        self.pnl = (exit_premium - self.entry_premium) * self.quantity
+        if self.order_action == "SELL":
+            # Short option: profit = (entry - exit) * quantity
+            self.pnl = (self.entry_premium - exit_premium) * self.quantity
+        else:
+            # Long option: profit = (exit - entry) * quantity
+            self.pnl = (exit_premium - self.entry_premium) * self.quantity
     
     def to_dict(self):
         """Convert to dictionary for JSON serialization"""
@@ -88,6 +106,7 @@ class OptionTrade:
         data['entry_time'] = datetime.fromisoformat(data['entry_time'])
         if data.get('exit_time'):
             data['exit_time'] = datetime.fromisoformat(data['exit_time'])
+        data.setdefault('order_action', 'BUY')  # Backward compat
         return OptionTrade(**data)
 
 
@@ -310,19 +329,20 @@ class NiftyOptionTrader:
         
         return None
     
-    def execute_signal(self, signal_type: str, strategy: str) -> Optional[OptionTrade]:
+    def execute_signal(self, signal_type: str, strategy: str, order_action: str = "BUY") -> Optional[OptionTrade]:
         """
         Execute option trade based on signal
         
         Args:
             signal_type: 'CALL' or 'PUT'
             strategy: Strategy name
+            order_action: 'BUY' (long option) or 'SELL' (short/write option)
         
         Returns:
             OptionTrade object if successful
         """
         print(f"\n{'='*70}")
-        print(f"SIGNAL DETECTED: {signal_type} from {strategy}")
+        print(f"SIGNAL DETECTED: {order_action} {signal_type} from {strategy}")
         print(f"{'='*70}")
         
         # Get NIFTY spot price
@@ -369,13 +389,27 @@ class NiftyOptionTrader:
         # Calculate risk per trade (2% of capital)
         risk_amount = self.capital * (self.risk_percent / 100)
         
-        # Calculate stop loss (10% below entry for safety)
-        stop_loss_percent = 10
-        stop_loss = entry_premium * (1 - stop_loss_percent / 100)
-        
-        # Calculate target (1:2 risk:reward)
-        risk_per_lot = entry_premium - stop_loss
-        target = entry_premium + (risk_per_lot * self.risk_reward_ratio)
+        if order_action == "SELL":
+            # SELLING option: collect premium, risk is unlimited (capped by SL)
+            # Stop loss is ABOVE entry (premium rising against us)
+            stop_loss_percent = 15  # 15% above entry for option writing
+            stop_loss = entry_premium * (1 + stop_loss_percent / 100)
+            
+            # Target is BELOW entry (premium decay/drop)
+            target_percent = 30  # Capture 30% premium decay
+            target = entry_premium * (1 - target_percent / 100)
+            
+            # Risk = (SL - entry) per lot
+            risk_per_lot = stop_loss - entry_premium
+        else:
+            # BUYING option: pay premium, risk is limited to premium paid
+            # Stop loss is BELOW entry (premium falling)
+            stop_loss_percent = 10
+            stop_loss = entry_premium * (1 - stop_loss_percent / 100)
+            
+            # Target is ABOVE entry (premium rising)
+            risk_per_lot = entry_premium - stop_loss
+            target = entry_premium + (risk_per_lot * self.risk_reward_ratio)
         
         # Calculate quantity (number of lots)
         # Risk per lot in rupees = risk_per_point * lot_size
@@ -383,16 +417,28 @@ class NiftyOptionTrader:
         num_lots = max(1, int(risk_amount / risk_per_lot_rupees))
         quantity = lot_size * num_lots
         
-        # Calculate total investment
-        investment = entry_premium * quantity
+        # Calculate total investment/margin
+        if order_action == "SELL":
+            # Option writing requires SPAN margin (higher)
+            investment = entry_premium * quantity * 2  # ~2x premium as margin
+        else:
+            investment = entry_premium * quantity
         
-        print(f"\nTrade Setup:")
+        print(f"\nTrade Setup ({order_action}):")
+        print(f"  Action: {order_action} {option_type}")
         print(f"  Quantity: {quantity} ({num_lots} lot{'s' if num_lots > 1 else ''})")
-        print(f"  Investment: Rs.{investment:,.2f}")
-        print(f"  Stop Loss: Rs.{stop_loss:.2f} (-{stop_loss_percent}%)")
-        print(f"  Target: Rs.{target:.2f} (+{stop_loss_percent * self.risk_reward_ratio}%)")
+        print(f"  {'Margin' if order_action == 'SELL' else 'Investment'}: Rs.{investment:,.2f}")
+        if order_action == "SELL":
+            print(f"  Stop Loss: Rs.{stop_loss:.2f} (+{stop_loss_percent}% above entry)")
+            print(f"  Target: Rs.{target:.2f} (-{target_percent}% premium decay)")
+        else:
+            print(f"  Stop Loss: Rs.{stop_loss:.2f} (-{stop_loss_percent}%)")
+            print(f"  Target: Rs.{target:.2f} (+{stop_loss_percent * self.risk_reward_ratio}%)")
         print(f"  Risk: Rs.{risk_per_lot * quantity:,.2f}")
-        print(f"  Potential Reward: Rs.{(target - entry_premium) * quantity:,.2f}")
+        if order_action == "SELL":
+            print(f"  Potential Reward: Rs.{(entry_premium - target) * quantity:,.2f}")
+        else:
+            print(f"  Potential Reward: Rs.{(target - entry_premium) * quantity:,.2f}")
         print(f"  Risk:Reward = 1:{self.risk_reward_ratio}")
         
         # Check if sufficient capital
@@ -402,8 +448,9 @@ class NiftyOptionTrader:
         
         # Create trade
         self.trade_counter += 1
+        action_prefix = "S" if order_action == "SELL" else "B"
         trade = OptionTrade(
-            trade_id=f"OPT-{self.trade_counter:04d}",
+            trade_id=f"{action_prefix}-OPT-{self.trade_counter:04d}",
             signal_type=signal_type,
             instrument_type=option_type,
             strike_price=strike,
@@ -416,6 +463,7 @@ class NiftyOptionTrader:
             strategy=strategy,
             instrument_id=instrument_id,
             expiry=expiry,
+            order_action=order_action,
             current_premium=entry_premium  # Initialize with entry premium
         )
         
@@ -607,7 +655,7 @@ class NiftyOptionTrader:
             print("-"*70)
             for trade in self.open_positions:
                 pnl = trade.pnl if trade.pnl else 0.0
-                print(f"{trade.trade_id} | {trade.instrument_type} {trade.strike_price} | "
+                print(f"{trade.trade_id} | {trade.order_action} {trade.instrument_type} {trade.strike_price} | "
                       f"Entry: Rs.{trade.entry_premium:.2f} | Current: Rs.{trade.current_premium:.2f} | "
                       f"P&L: Rs.{pnl:.2f}")
             print("-"*70)
@@ -620,9 +668,13 @@ if __name__ == "__main__":
     # Create trader
     trader = NiftyOptionTrader(initial_capital=100000)
     
-    # Simulate CALL signal
-    print("\n--- Simulating CALL Signal ---")
-    trade1 = trader.execute_signal('CALL', 'Bollinger+MACD')
+    # Simulate BUY CALL signal (long CE option)
+    print("\n--- Simulating BUY CALL Signal ---")
+    trade1 = trader.execute_signal('CALL', 'Bollinger+MACD', order_action='BUY')
+    
+    # Simulate SELL PUT signal (short PE option - premium collection)
+    print("\n--- Simulating SELL PUT Signal ---")
+    trade2 = trader.execute_signal('PUT', 'Option Buy/Sell', order_action='SELL')
     
     # Display dashboard
     trader.display_dashboard()

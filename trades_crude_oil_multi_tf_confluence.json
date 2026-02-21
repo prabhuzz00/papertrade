@@ -16,6 +16,7 @@
       "strike": 5850,
       "option_type": "PE",
       "spot_price": 5856.0,
+      "order_action": "BUY",
       "exit_price": 125.30000000000001,
       "exit_time": "2026-02-12T18:35:28.353521",
       "status": "STOP_LOSS",

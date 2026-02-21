@@ -27,6 +27,7 @@ class Trade:
     strike: int = 0  # Option strike price
     option_type: str = ""  # CE or PE
     spot_price: float = 0  # Spot price at entry
+    order_action: str = "BUY"  # 'BUY' (long) or 'SELL' (short/write)
     
     exit_price: Optional[float] = None
     exit_time: Optional[datetime] = None
@@ -44,12 +45,16 @@ class Trade:
         self.current_price = price
         
         if self.status == "OPEN":
-            # For option trades (both CALL/PUT), we BUY the option
-            # P&L = (current_premium - entry_premium) * quantity
-            # PUT option premium rises when spot falls, so this is always correct
             if self.strike > 0 and self.option_type:
-                # Option trade - always long (bought option)
-                self.pnl = (price - self.entry_price) * self.quantity
+                # Option trade
+                if self.order_action == "SELL":
+                    # Short option: profit when premium falls
+                    # P&L = (entry_premium - current_premium) * quantity
+                    self.pnl = (self.entry_price - price) * self.quantity
+                else:
+                    # Long option (BUY): profit when premium rises
+                    # P&L = (current_premium - entry_premium) * quantity
+                    self.pnl = (price - self.entry_price) * self.quantity
             else:
                 # Spot/futures trade - directional
                 if self.signal_type == "CALL":
@@ -60,36 +65,62 @@ class Trade:
     def _apply_trailing_stop_loss(self, current_price: float):
         """Apply trailing stop loss based on price movement towards target.
         
-        Trailing SL rules (for long/option positions):
+        Trailing SL rules:
+        For BUY (long) positions:
         - When price hits 50% of target points → move SL to entry_price + 1
         - When price hits 75% of target points → move SL to entry_price + 50% of target_points
+        
+        For SELL (short) positions:
+        - When price hits 50% of target points → move SL to entry_price - 1
+        - When price hits 75% of target points → move SL to entry_price - 50% of target_points
         """
         if self.target_points <= 0:
             return  # No trailing SL if target_points not set
         
-        # Calculate price thresholds
-        price_50pct = self.entry_price + (self.target_points * 0.50)
-        price_75pct = self.entry_price + (self.target_points * 0.75)
+        is_short = (self.order_action == "SELL")
         
-        # Check stages in order (highest first so we don't skip)
-        if self.trailing_sl_stage != "STAGE_75" and current_price >= price_75pct:
-            # 75% of target reached → SL moves to entry + 50% of target_points
-            new_sl = self.entry_price + (self.target_points * 0.50)
-            if new_sl > self.stop_loss:
-                old_sl = self.stop_loss
-                self.stop_loss = new_sl
-                self.trailing_sl_stage = "STAGE_75"
-                print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 75% target → "
-                      f"SL moved {old_sl:.2f} → {new_sl:.2f}")
-        elif self.trailing_sl_stage == "INITIAL" and current_price >= price_50pct:
-            # 50% of target reached → SL moves to entry + 1
-            new_sl = self.entry_price + 1
-            if new_sl > self.stop_loss:
-                old_sl = self.stop_loss
-                self.stop_loss = new_sl
-                self.trailing_sl_stage = "STAGE_50"
-                print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 50% target → "
-                      f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+        if is_short:
+            # For SELL: price moving DOWN is favorable
+            price_50pct = self.entry_price - (self.target_points * 0.50)
+            price_75pct = self.entry_price - (self.target_points * 0.75)
+            
+            if self.trailing_sl_stage != "STAGE_75" and current_price <= price_75pct:
+                new_sl = self.entry_price - (self.target_points * 0.50)
+                if new_sl < self.stop_loss:
+                    old_sl = self.stop_loss
+                    self.stop_loss = new_sl
+                    self.trailing_sl_stage = "STAGE_75"
+                    print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 75% target → "
+                          f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+            elif self.trailing_sl_stage == "INITIAL" and current_price <= price_50pct:
+                new_sl = self.entry_price - 1
+                if new_sl < self.stop_loss:
+                    old_sl = self.stop_loss
+                    self.stop_loss = new_sl
+                    self.trailing_sl_stage = "STAGE_50"
+                    print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 50% target → "
+                          f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+        else:
+            # For BUY: price moving UP is favorable
+            price_50pct = self.entry_price + (self.target_points * 0.50)
+            price_75pct = self.entry_price + (self.target_points * 0.75)
+            
+            if self.trailing_sl_stage != "STAGE_75" and current_price >= price_75pct:
+                new_sl = self.entry_price + (self.target_points * 0.50)
+                if new_sl > self.stop_loss:
+                    old_sl = self.stop_loss
+                    self.stop_loss = new_sl
+                    self.trailing_sl_stage = "STAGE_75"
+                    print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 75% target → "
+                          f"SL moved {old_sl:.2f} → {new_sl:.2f}")
+            elif self.trailing_sl_stage == "INITIAL" and current_price >= price_50pct:
+                new_sl = self.entry_price + 1
+                if new_sl > self.stop_loss:
+                    old_sl = self.stop_loss
+                    self.stop_loss = new_sl
+                    self.trailing_sl_stage = "STAGE_50"
+                    print(f"  [TRAILING SL] {self.trade_id}: Price {current_price:.2f} hit 50% target → "
+                          f"SL moved {old_sl:.2f} → {new_sl:.2f}")
     
     def check_exit_conditions(self, current_price: float) -> bool:
         """Check if stop loss or target hit, and apply trailing stop loss"""
@@ -99,17 +130,24 @@ class Trade:
         # Apply trailing stop loss adjustment BEFORE checking exit
         self._apply_trailing_stop_loss(current_price)
         
-        # For option trades (both CALL/PUT), we BUY the option
-        # SL triggers when premium drops below stop_loss
-        # Target triggers when premium rises above target
         if self.strike > 0 and self.option_type:
-            # Option trade - always long position
-            if current_price >= self.target:
-                self.close_trade(current_price, "TARGET")
-                return True
-            elif current_price <= self.stop_loss:
-                self.close_trade(current_price, "STOP_LOSS")
-                return True
+            # Option trade
+            if self.order_action == "SELL":
+                # Short option: target is BELOW entry (premium decay), SL is ABOVE entry
+                if current_price <= self.target:
+                    self.close_trade(current_price, "TARGET")
+                    return True
+                elif current_price >= self.stop_loss:
+                    self.close_trade(current_price, "STOP_LOSS")
+                    return True
+            else:
+                # Long option (BUY): target is ABOVE entry, SL is BELOW
+                if current_price >= self.target:
+                    self.close_trade(current_price, "TARGET")
+                    return True
+                elif current_price <= self.stop_loss:
+                    self.close_trade(current_price, "STOP_LOSS")
+                    return True
         else:
             # Spot/futures trade - directional
             if self.signal_type == "CALL":
@@ -135,11 +173,14 @@ class Trade:
         self.exit_time = datetime.now()
         self.status = status
         
-        # For option trades (both CALL/PUT), we BUY the option
-        # P&L = (exit_premium - entry_premium) * quantity
         if self.strike > 0 and self.option_type:
-            # Option trade - always long (bought option)
-            self.pnl = (exit_price - self.entry_price) * self.quantity
+            # Option trade
+            if self.order_action == "SELL":
+                # Short option: profit = (entry_premium - exit_premium) * quantity
+                self.pnl = (self.entry_price - exit_price) * self.quantity
+            else:
+                # Long option (BUY): profit = (exit_premium - entry_premium) * quantity
+                self.pnl = (exit_price - self.entry_price) * self.quantity
         else:
             # Spot/futures trade - directional
             if self.signal_type == "CALL":
@@ -165,6 +206,7 @@ class Trade:
         data.setdefault('initial_stop_loss', data.get('stop_loss', 0))
         data.setdefault('target_points', 0)
         data.setdefault('trailing_sl_stage', 'INITIAL')
+        data.setdefault('order_action', 'BUY')  # Backward compat
         return Trade(**data)
 
 
@@ -184,7 +226,8 @@ class PaperTradingEngine:
                      stop_loss: float, target: float, quantity: int,
                      strategy: str, notes: str = "",
                      strike: int = 0, option_type: str = "", spot_price: float = 0,
-                     target_points: float = 0) -> Optional[Trade]:
+                     target_points: float = 0,
+                     order_action: str = "BUY") -> Optional[Trade]:
         """
         Open a new position
         
@@ -200,12 +243,17 @@ class PaperTradingEngine:
             option_type: 'CE' or 'PE'
             spot_price: Spot price at entry
             target_points: Target in points from entry (for trailing SL)
+            order_action: 'BUY' (long/buy option) or 'SELL' (short/write option)
         
         Returns:
             Trade object if successful, None otherwise
         """
         # Calculate required margin
-        margin_required = entry_price * quantity * 0.20  # 20% margin for F&O
+        # Selling options requires higher margin (full SPAN margin)
+        if order_action == "SELL":
+            margin_required = entry_price * quantity * 0.50  # 50% margin for option writing
+        else:
+            margin_required = entry_price * quantity * 0.20  # 20% margin for buying F&O
         
         if margin_required > self.capital:
             print(f"Insufficient capital. Required: ₹{margin_required:,.2f}, Available: ₹{self.capital:,.2f}")
@@ -213,8 +261,9 @@ class PaperTradingEngine:
         
         # Create trade
         self.trade_counter += 1
+        action_prefix = "S" if order_action == "SELL" else "B"
         trade = Trade(
-            trade_id=f"{strategy[:3].upper()}-{self.trade_counter:04d}",
+            trade_id=f"{action_prefix}-{strategy[:3].upper()}-{self.trade_counter:04d}",
             signal_type=signal_type,
             entry_price=entry_price,
             entry_time=datetime.now(),
@@ -226,6 +275,7 @@ class PaperTradingEngine:
             strike=strike,
             option_type=option_type,
             spot_price=spot_price,
+            order_action=order_action,
             initial_stop_loss=stop_loss,
             target_points=target_points,
             trailing_sl_stage="INITIAL"
@@ -236,7 +286,7 @@ class PaperTradingEngine:
         
         self.open_positions.append(trade)
         
-        print(f"✓ Position opened: {trade.trade_id} - {signal_type} @ ₹{entry_price:.2f}")
+        print(f"✓ Position opened: {trade.trade_id} - {order_action} {signal_type} @ ₹{entry_price:.2f}")
         
         return trade
     
@@ -374,23 +424,50 @@ if __name__ == "__main__":
     # Create engine
     engine = PaperTradingEngine(initial_capital=100000)
     
-    # Open a CALL position
+    # Open a BUY CALL position (long CE option)
     trade1 = engine.open_position(
         signal_type='CALL',
-        entry_price=23500,
-        stop_loss=23450,
-        target=23600,
+        entry_price=150,
+        stop_loss=120,
+        target=200,
         quantity=75,
-        strategy='Bollinger + MACD',
-        notes='Bullish breakout above BB upper'
+        strategy='Option Buy/Sell',
+        notes='Bullish trend - BUY CE option',
+        strike=23500,
+        option_type='CE',
+        spot_price=23500,
+        order_action='BUY'
     )
     
-    # Simulate price movement
-    print("\n--- Price updates ---")
-    engine.update_positions(23520)  # Price moves up
-    print(f"Unrealized P&L: ₹{trade1.pnl:,.2f}")
+    # Open a SELL PUT position (short PE option - collect premium)
+    trade2 = engine.open_position(
+        signal_type='PUT',
+        entry_price=120,
+        stop_loss=180,  # SL is ABOVE entry for SELL
+        target=60,      # Target is BELOW entry for SELL (premium decay)
+        quantity=75,
+        strategy='Option Buy/Sell',
+        notes='Sideways market - SELL PE option for premium',
+        strike=23400,
+        option_type='PE',
+        spot_price=23500,
+        order_action='SELL'
+    )
     
-    engine.update_positions(23600)  # Target hit
+    # Simulate price movement for BUY trade
+    print("\n--- BUY CALL: Price updates ---")
+    engine.update_positions(170)  # Premium rises → profit for BUY
+    print(f"BUY CALL P&L: ₹{trade1.pnl:,.2f}")
+    
+    engine.update_positions(200)  # Target hit for BUY CALL
+    
+    # Simulate price movement for SELL trade (different update needed)
+    print("\n--- SELL PUT: Price updates ---")
+    # For SELL trade, premium dropping = profit
+    trade2.update_current_price(90)  # Premium drops → profit for SELL
+    print(f"SELL PUT P&L: ₹{trade2.pnl:,.2f}")
+    
+    trade2.check_exit_conditions(60)  # Target hit for SELL PUT
     
     # Statistics
     print("\n--- Statistics ---")

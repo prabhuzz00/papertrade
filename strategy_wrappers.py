@@ -2254,3 +2254,825 @@ class MultiTimeframeConfluenceStrategy:
     def get_info(self):
         """Get strategy information"""
         return self.description
+
+
+class OptionBuySellStrategy:
+    """
+    Option Buy/Sell Strategy
+    
+    Dynamically decides whether to BUY or SELL options based on market regime:
+    
+    TRENDING MARKET (ADX > 25):
+        → BUY options in the trend direction
+        → CALL signal: BUY CE option (long call)
+        → PUT signal: BUY PE option (long put)
+        → Benefits from directional moves + high IV expansion
+    
+    SIDEWAYS MARKET (ADX < 20):
+        → SELL (write) options at extremes for premium collection
+        → At resistance + RSI > 60: SELL CE (short call) — collect premium on decay
+        → At support + RSI < 40: SELL PE (short put) — collect premium on decay
+        → Benefits from theta decay + IV contraction
+    
+    TRANSITION ZONE (20 ≤ ADX ≤ 25):
+        → No signal — wait for clarity
+    
+    Signal dict includes 'order_action': 'BUY' or 'SELL' to instruct the
+    paper trading engine on the position direction.
+    """
+    
+    ADX_TREND_THRESHOLD = 25   # Above this = trending → BUY options
+    ADX_SIDEWAYS_THRESHOLD = 20  # Below this = sideways → SELL options
+    RSI_OVERBOUGHT = 60        # For sell CE signals
+    RSI_OVERSOLD = 40          # For sell PE signals
+    RSI_BULLISH_MIN = 50       # For buy CE signals
+    RSI_BEARISH_MAX = 50       # For buy PE signals
+    
+    def __init__(self):
+        self.name = "Option Buy/Sell"
+        self.description = """
+        <h3>Option Buy/Sell Strategy</h3>
+        <p><b>Concept:</b> Adapts between buying and selling options based on 
+        market regime detection using ADX.</p>
+        <p><b>Trending Market (ADX > 25) → BUY options:</b></p>
+        <ul>
+            <li><b>BUY CALL (CE):</b> EMA bullish crossover + RSI > 50 + strong momentum</li>
+            <li><b>BUY PUT (PE):</b> EMA bearish crossover + RSI < 50 + strong momentum</li>
+        </ul>
+        <p><b>Sideways Market (ADX < 20) → SELL options:</b></p>
+        <ul>
+            <li><b>SELL CALL (CE):</b> Price at resistance + RSI > 60 (overbought, expect decay)</li>
+            <li><b>SELL PUT (PE):</b> Price at support + RSI < 40 (oversold, expect decay)</li>
+        </ul>
+        <p><b>Transition Zone (20 ≤ ADX ≤ 25):</b> No signal — wait for clarity</p>
+        <p><b>Risk Management:</b></p>
+        <ul>
+            <li>BUY trades: SL = 1 ATR, Target = 2 ATR</li>
+            <li>SELL trades: SL = 1.5 ATR above/below entry, Target = 50% premium decay</li>
+        </ul>
+        """
+    
+    def calc_atr(self, data, period=14):
+        """Calculate Average True Range"""
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - data['Close'].shift())
+        low_close = np.abs(data['Low'] - data['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        return true_range.rolling(period).mean()
+    
+    def calc_rsi(self, data, period=14):
+        """Calculate RSI"""
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+    
+    def calc_adx(self, df, period=14):
+        """Calculate ADX (Average Directional Index)"""
+        high = df['High'].squeeze()
+        low = df['Low'].squeeze()
+        
+        high_diff = high.diff()
+        low_diff = -low.diff()
+        
+        plus_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
+        minus_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
+        
+        atr = self.calc_atr(df, period)
+        if isinstance(atr, pd.DataFrame):
+            atr = atr.squeeze()
+        
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+        
+        if isinstance(adx, pd.DataFrame):
+            adx = adx.squeeze()
+        
+        return adx, plus_di, minus_di
+    
+    def calc_ema(self, data, period):
+        """Calculate Exponential Moving Average"""
+        return data['Close'].ewm(span=period, adjust=False).mean()
+    
+    def calc_bollinger(self, df, period=20, std_dev=2):
+        """Calculate Bollinger Bands"""
+        sma = df['Close'].rolling(window=period).mean()
+        std = df['Close'].rolling(window=period).std()
+        upper = sma + (std_dev * std)
+        lower = sma - (std_dev * std)
+        return upper, lower, sma
+    
+    def add_indicators(self, df):
+        """Add all required indicators"""
+        df['ATR'] = self.calc_atr(df)
+        df['RSI'] = self.calc_rsi(df)
+        df['ADX'], df['Plus_DI'], df['Minus_DI'] = self.calc_adx(df)
+        df['EMA_9'] = self.calc_ema(df, 9)
+        df['EMA_21'] = self.calc_ema(df, 21)
+        df['BB_upper'], df['BB_lower'], df['BB_middle'] = self.calc_bollinger(df)
+        df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
+        
+        # Support and Resistance
+        lookback = 20
+        df['Resistance'] = df['High'].rolling(window=lookback).max()
+        df['Support'] = df['Low'].rolling(window=lookback).min()
+        
+        return df
+    
+    def _get_val(self, series_val):
+        """Safely extract scalar value"""
+        if hasattr(series_val, 'item'):
+            return series_val.item()
+        return float(series_val)
+    
+    def _trending_signal(self, df, close, rsi, atr, adx):
+        """
+        Generate BUY option signals for trending markets.
+        Uses EMA crossover + momentum confirmation.
+        """
+        ema9_current = self._get_val(df['EMA_9'].iloc[-1])
+        ema21_current = self._get_val(df['EMA_21'].iloc[-1])
+        ema9_prev = self._get_val(df['EMA_9'].iloc[-2])
+        ema21_prev = self._get_val(df['EMA_21'].iloc[-2])
+        plus_di = self._get_val(df['Plus_DI'].iloc[-1])
+        minus_di = self._get_val(df['Minus_DI'].iloc[-1])
+        
+        # Volume check
+        vol = self._get_val(df['Volume'].iloc[-1])
+        vol_ma = self._get_val(df['Volume_MA'].iloc[-1])
+        if pd.isna(vol_ma) or vol_ma <= 0:
+            return None
+        strong_volume = vol > vol_ma * 1.1
+        
+        # Bullish crossover: 9 EMA crosses above 21 EMA
+        bullish_cross = (ema9_prev <= ema21_prev and ema9_current > ema21_current)
+        # Or already in strong uptrend: 9 EMA well above 21 EMA + +DI > -DI  
+        bullish_momentum = (ema9_current > ema21_current and plus_di > minus_di 
+                           and rsi >= self.RSI_BULLISH_MIN)
+        
+        # Bearish crossover: 9 EMA crosses below 21 EMA
+        bearish_cross = (ema9_prev >= ema21_prev and ema9_current < ema21_current)
+        # Or already in strong downtrend
+        bearish_momentum = (ema9_current < ema21_current and minus_di > plus_di 
+                           and rsi <= self.RSI_BEARISH_MAX)
+        
+        # BUY CALL (long CE) — Bullish trending
+        if (bullish_cross or bullish_momentum) and strong_volume:
+            entry_price = close
+            stop_loss = entry_price - (atr * 1.0)
+            target = entry_price + (atr * 2.0)
+            
+            confidence = min(1.0, (adx - self.ADX_TREND_THRESHOLD) / 20 + 0.3)
+            
+            return {
+                'signal': 'CALL',
+                'order_action': 'BUY',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': confidence,
+                'reason': (f'TRENDING → BUY CE | ADX: {adx:.1f}, RSI: {rsi:.1f}, '
+                          f'+DI: {plus_di:.1f}, -DI: {minus_di:.1f}, '
+                          f'EMA9: {ema9_current:.1f} > EMA21: {ema21_current:.1f}'
+                          f'{" [CROSSOVER]" if bullish_cross else ""}'),
+                'atr': atr,
+            }
+        
+        # BUY PUT (long PE) — Bearish trending
+        if (bearish_cross or bearish_momentum) and strong_volume:
+            entry_price = close
+            stop_loss = entry_price + (atr * 1.0)
+            target = entry_price - (atr * 2.0)
+            
+            confidence = min(1.0, (adx - self.ADX_TREND_THRESHOLD) / 20 + 0.3)
+            
+            return {
+                'signal': 'PUT',
+                'order_action': 'BUY',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': confidence,
+                'reason': (f'TRENDING → BUY PE | ADX: {adx:.1f}, RSI: {rsi:.1f}, '
+                          f'+DI: {plus_di:.1f}, -DI: {minus_di:.1f}, '
+                          f'EMA9: {ema9_current:.1f} < EMA21: {ema21_current:.1f}'
+                          f'{" [CROSSOVER]" if bearish_cross else ""}'),
+                'atr': atr,
+            }
+        
+        return None
+    
+    def _sideways_signal(self, df, close, rsi, atr, adx):
+        """
+        Generate SELL option signals for sideways/range-bound markets.
+        Sells options at extremes (resistance for CE, support for PE) to
+        collect premium from time decay.
+        """
+        resistance = self._get_val(df['Resistance'].iloc[-1])
+        support = self._get_val(df['Support'].iloc[-1])
+        bb_upper = self._get_val(df['BB_upper'].iloc[-1])
+        bb_lower = self._get_val(df['BB_lower'].iloc[-1])
+        
+        if pd.isna(resistance) or pd.isna(support):
+            return None
+        
+        range_size = resistance - support
+        if range_size <= 0:
+            return None
+        
+        # Distance from extremes (as % of range)
+        dist_to_resistance = resistance - close
+        dist_to_support = close - support
+        
+        # SELL CALL (short CE) — At resistance, RSI overbought
+        # Premium will decay as price pulls back from resistance
+        if (dist_to_resistance < range_size * 0.10 and  # Within 10% of resistance
+            rsi > self.RSI_OVERBOUGHT and
+            close >= bb_upper * 0.995):  # Near or above BB upper
+            
+            entry_price = close
+            # For SELL: SL is above entry (premium rises = loss)
+            stop_loss = entry_price + (atr * 1.5)
+            # Target is below entry (premium falls = profit)
+            target = entry_price * 0.50  # Target 50% premium decay
+            
+            confidence = min(1.0, (rsi - self.RSI_OVERBOUGHT) / 25 + 0.3)
+            
+            return {
+                'signal': 'CALL',
+                'order_action': 'SELL',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': confidence,
+                'reason': (f'SIDEWAYS → SELL CE | ADX: {adx:.1f}, RSI: {rsi:.1f}, '
+                          f'Close: {close:.1f} near Resistance: {resistance:.1f}, '
+                          f'BB Upper: {bb_upper:.1f} | Premium decay expected'),
+                'atr': atr,
+            }
+        
+        # SELL PUT (short PE) — At support, RSI oversold
+        # Premium will decay as price bounces from support
+        if (dist_to_support < range_size * 0.10 and  # Within 10% of support
+            rsi < self.RSI_OVERSOLD and
+            close <= bb_lower * 1.005):  # Near or below BB lower
+            
+            entry_price = close
+            # For SELL: SL is above entry (premium rises = loss)
+            stop_loss = entry_price + (atr * 1.5)
+            # Target is below entry (premium falls = profit)
+            target = entry_price * 0.50  # Target 50% premium decay
+            
+            confidence = min(1.0, (self.RSI_OVERSOLD - rsi) / 25 + 0.3)
+            
+            return {
+                'signal': 'PUT',
+                'order_action': 'SELL',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': confidence,
+                'reason': (f'SIDEWAYS → SELL PE | ADX: {adx:.1f}, RSI: {rsi:.1f}, '
+                          f'Close: {close:.1f} near Support: {support:.1f}, '
+                          f'BB Lower: {bb_lower:.1f} | Premium decay expected'),
+                'atr': atr,
+            }
+        
+        return None
+    
+    def get_signal(self, df):
+        """
+        Get trading signal with order_action (BUY or SELL).
+        
+        Returns signal dict with additional 'order_action' key:
+            'BUY' = go long the option (pay premium)
+            'SELL' = go short/write the option (collect premium)
+        """
+        if len(df) < 50:
+            return None
+        
+        if 'ADX' not in df.columns:
+            df = self.add_indicators(df)
+        
+        last = df.iloc[-1]
+        
+        try:
+            close = self._get_val(last['Close'])
+            rsi = self._get_val(last['RSI'])
+            adx = self._get_val(last['ADX'])
+            atr = self._get_val(last['ATR'])
+            
+            if pd.isna(close) or pd.isna(rsi) or pd.isna(adx) or pd.isna(atr):
+                return None
+        except (ValueError, TypeError, KeyError) as e:
+            return None
+        
+        # ── TRENDING MARKET → BUY options ──
+        if adx > self.ADX_TREND_THRESHOLD:
+            signal = self._trending_signal(df, close, rsi, atr, adx)
+            if signal:
+                return signal
+        
+        # ── SIDEWAYS MARKET → SELL options ──
+        elif adx < self.ADX_SIDEWAYS_THRESHOLD:
+            signal = self._sideways_signal(df, close, rsi, atr, adx)
+            if signal:
+                return signal
+        
+        # ── TRANSITION ZONE → No signal ──
+        # ADX between 20-25: market regime unclear, stay out
+        
+        return None
+    
+    def get_info(self):
+        """Get strategy information"""
+        return self.description
+
+
+class ShortVolGridStrategy:
+    """
+    Short Vol Inventory (Strike Grid) Strategy
+    
+    Sells multiple OTM options across a grid of strikes to systematically
+    collect premium in range-bound, low-volatility environments.
+    
+    Structure:
+        - Identifies low-vol regime via ADX + Bollinger Band Width
+        - Calculates a grid of OTM strikes spaced evenly around ATM
+        - Sells OTM calls above resistance and OTM puts below support
+        - Monitors aggregate delta exposure and caps risk
+        - Targets 60% of maximum premium collected (theta-decay exit)
+    
+    Can operate in three modes:
+        BOTH_SIDES : Sell CE above + PE below (iron condor-style)
+        CALL_ONLY  : Sell OTM CE only (bearish/neutral lean)
+        PUT_ONLY   : Sell OTM PE only (bullish/neutral lean)
+    
+    Each call to get_signal() returns one SELL order for the best available
+    grid strike that hasn't been filled yet. The trading engine's per-strategy
+    position tracking prevents duplicate entries.
+    """
+    
+    # ── Market regime thresholds ──
+    ADX_MAX = 20              # ADX must be below this (sideways)
+    BB_WIDTH_MAX_ATR = 3.0    # BB width must be < 3x ATR (tight range)
+    RSI_LOWER = 35            # Don't sell puts if RSI already very oversold
+    RSI_UPPER = 65            # Don't sell calls if RSI already very overbought
+    
+    # ── Grid parameters (defaults, configurable via __init__) ──
+    DEFAULT_NUM_STRIKES = 5
+    DEFAULT_STRIKE_SPACING_PCT = 2.0   # % of spot price between strikes
+    DEFAULT_SELL_BOTH_SIDES = True
+    DEFAULT_MAX_AGGREGATE_DELTA = 0.5
+    DEFAULT_PROFIT_TARGET_PCT = 0.60   # Exit when 60% of max premium captured
+    
+    def __init__(self, num_strikes=None, strike_spacing_pct=None,
+                 sell_both_sides=None, max_aggregate_delta=None,
+                 profit_target_pct=None):
+        self.num_strikes = num_strikes or self.DEFAULT_NUM_STRIKES
+        self.strike_spacing_pct = strike_spacing_pct or self.DEFAULT_STRIKE_SPACING_PCT
+        self.sell_both_sides = sell_both_sides if sell_both_sides is not None else self.DEFAULT_SELL_BOTH_SIDES
+        self.max_aggregate_delta = max_aggregate_delta or self.DEFAULT_MAX_AGGREGATE_DELTA
+        self.profit_target_pct = profit_target_pct or self.DEFAULT_PROFIT_TARGET_PCT
+        
+        # Internal grid tracking (reset each session)
+        self._last_signal_side = 'PUT'  # Alternate starting side
+        
+        self.name = "Short Vol Grid"
+        self.description = f"""
+        <h3>Short Vol Inventory (Strike Grid)</h3>
+        <p><b>Type:</b> Short Volatility / Premium Collection</p>
+        <p><b>Structure:</b> Sells multiple OTM options across a grid of strikes</p>
+        <p><b>Best For:</b> Range-bound markets, low volatility environments</p>
+        <hr>
+        <p><b>Entry Conditions:</b></p>
+        <ul>
+            <li>ADX &lt; {self.ADX_MAX} (confirmed sideways market)</li>
+            <li>Bollinger Band Width &lt; {self.BB_WIDTH_MAX_ATR}× ATR (tight range)</li>
+            <li>Price inside support/resistance channel</li>
+        </ul>
+        <p><b>Grid Setup:</b></p>
+        <ul>
+            <li>Number of strikes: <b>{self.num_strikes}</b></li>
+            <li>Strike spacing: <b>{self.strike_spacing_pct}%</b> of spot</li>
+            <li>Sides: <b>{'Both (CE + PE)' if self.sell_both_sides else 'One side only'}</b></li>
+        </ul>
+        <p><b>Sell Logic:</b></p>
+        <ul>
+            <li><b>SELL CE:</b> OTM call above resistance, RSI &lt; {self.RSI_UPPER}</li>
+            <li><b>SELL PE:</b> OTM put below support, RSI &gt; {self.RSI_LOWER}</li>
+            <li>Alternates sides when both-sides enabled</li>
+        </ul>
+        <p><b>Risk Management:</b></p>
+        <ul>
+            <li>Max aggregate delta: <b>{self.max_aggregate_delta}</b></li>
+            <li>Profit target: <b>{self.profit_target_pct:.0%}</b> of max premium</li>
+            <li>Stop loss: 1.5× ATR beyond entry premium</li>
+        </ul>
+        """
+    
+    # ── Indicator helpers ────────────────────────────────────
+    
+    def calc_atr(self, data, period=14):
+        """Calculate Average True Range"""
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - data['Close'].shift())
+        low_close = np.abs(data['Low'] - data['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        return true_range.rolling(period).mean()
+    
+    def calc_rsi(self, data, period=14):
+        """Calculate RSI"""
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+    
+    def calc_adx(self, df, period=14):
+        """Calculate ADX"""
+        high = df['High'].squeeze()
+        low = df['Low'].squeeze()
+        
+        high_diff = high.diff()
+        low_diff = -low.diff()
+        
+        plus_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
+        minus_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
+        
+        atr = self.calc_atr(df, period)
+        if isinstance(atr, pd.DataFrame):
+            atr = atr.squeeze()
+        
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+        if isinstance(adx, pd.DataFrame):
+            adx = adx.squeeze()
+        return adx
+    
+    def calc_bollinger(self, df, period=20, std_dev=2):
+        """Calculate Bollinger Bands"""
+        sma = df['Close'].rolling(window=period).mean()
+        std = df['Close'].rolling(window=period).std()
+        upper = sma + (std_dev * std)
+        lower = sma - (std_dev * std)
+        return upper, lower, sma
+    
+    def add_indicators(self, df):
+        """Add all required indicators"""
+        df['ATR'] = self.calc_atr(df)
+        df['RSI'] = self.calc_rsi(df)
+        df['ADX'] = self.calc_adx(df)
+        df['BB_upper'], df['BB_lower'], df['BB_middle'] = self.calc_bollinger(df)
+        df['BB_width'] = df['BB_upper'] - df['BB_lower']
+        
+        # Support / Resistance
+        lookback = 20
+        df['Resistance'] = df['High'].rolling(window=lookback).max()
+        df['Support'] = df['Low'].rolling(window=lookback).min()
+        
+        return df
+    
+    def _get_val(self, v):
+        """Safely extract scalar"""
+        if hasattr(v, 'item'):
+            return v.item()
+        return float(v)
+    
+    # ── Grid strike calculation ──────────────────────────────
+    
+    def _compute_grid(self, close, atr):
+        """
+        Compute the grid of OTM strikes around the current price.
+        
+        Returns two lists:
+            ce_strikes : list of strike prices for OTM calls (above close)
+            pe_strikes : list of strike prices for OTM puts (below close)
+        """
+        spacing = close * (self.strike_spacing_pct / 100.0)
+        # Ensure spacing is at least 1 ATR to stay meaningfully OTM
+        spacing = max(spacing, atr * 0.5)
+        
+        ce_strikes = []
+        pe_strikes = []
+        
+        for i in range(1, self.num_strikes + 1):
+            ce_strikes.append(round(close + spacing * i, 2))
+            pe_strikes.append(round(close - spacing * i, 2))
+        
+        return ce_strikes, pe_strikes
+    
+    def _estimate_delta(self, close, strike, option_side, atr):
+        """
+        Rough delta estimate for an OTM option.
+        Uses distance-from-ATM as a proxy (no Black-Scholes needed).
+        
+        Returns absolute delta (0 to ~0.5 for OTM).
+        """
+        distance = abs(close - strike)
+        # Normalise by ATR — deep OTM options have tiny delta
+        # ATM ≈ 0.50, 1 ATR OTM ≈ 0.30, 2 ATR OTM ≈ 0.15, 3+ ATR ≈ 0.05
+        if atr <= 0:
+            return 0.25
+        ratio = distance / atr
+        delta = max(0.02, 0.50 * np.exp(-0.5 * ratio))
+        return delta
+    
+    # ── Signal logic ─────────────────────────────────────────
+    
+    def _pick_best_strike(self, close, rsi, atr, support, resistance):
+        """
+        Pick the single best grid strike to sell right now.
+        
+        Logic:
+            - If sell_both_sides, alternate between CE and PE
+            - CE candidates: strikes above resistance (safe OTM)
+            - PE candidates: strikes below support (safe OTM)
+            - Skip if RSI is too extreme in that direction
+            - Pick the nearest OTM strike (highest premium, most theta)
+            - Check delta cap
+        
+        Returns (signal_type, strike, delta, grid_info) or None
+        """
+        ce_strikes, pe_strikes = self._compute_grid(close, atr)
+        
+        candidates = []
+        
+        # ── CE candidates (sell calls above resistance) ──
+        if rsi < self.RSI_UPPER:
+            for s in ce_strikes:
+                if s > resistance:  # Must be OTM (above resistance)
+                    delta = self._estimate_delta(close, s, 'CE', atr)
+                    if delta <= self.max_aggregate_delta:
+                        candidates.append(('CALL', s, delta, 'CE'))
+        
+        # ── PE candidates (sell puts below support) ──
+        if rsi > self.RSI_LOWER:
+            for s in pe_strikes:
+                if s < support:  # Must be OTM (below support)
+                    delta = self._estimate_delta(close, s, 'PE', atr)
+                    if delta <= self.max_aggregate_delta:
+                        candidates.append(('PUT', s, delta, 'PE'))
+        
+        if not candidates:
+            return None
+        
+        if self.sell_both_sides:
+            # Alternate between CE and PE for balanced exposure
+            preferred_side = 'CALL' if self._last_signal_side == 'PUT' else 'PUT'
+            preferred = [c for c in candidates if c[0] == preferred_side]
+            if preferred:
+                candidates = preferred
+        
+        # Sort by delta descending — nearest OTM = most premium = best theta
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        
+        best = candidates[0]
+        return best
+    
+    def get_signal(self, df):
+        """
+        Generate a SELL signal for the best available grid strike.
+        
+        Only fires in confirmed low-volatility, range-bound markets.
+        Returns signal dict with order_action='SELL'.
+        """
+        if len(df) < 50:
+            return None
+        
+        if 'ADX' not in df.columns:
+            df = self.add_indicators(df)
+        
+        last = df.iloc[-1]
+        
+        try:
+            close = self._get_val(last['Close'])
+            rsi = self._get_val(last['RSI'])
+            adx = self._get_val(last['ADX'])
+            atr = self._get_val(last['ATR'])
+            bb_width = self._get_val(last['BB_width'])
+            bb_upper = self._get_val(last['BB_upper'])
+            bb_lower = self._get_val(last['BB_lower'])
+            support = self._get_val(last['Support'])
+            resistance = self._get_val(last['Resistance'])
+            
+            if any(pd.isna(v) for v in [close, rsi, adx, atr, bb_width, support, resistance]):
+                return None
+        except (ValueError, TypeError, KeyError):
+            return None
+        
+        # ── Regime filter: must be low-vol & sideways ──
+        if adx >= self.ADX_MAX:
+            return None  # Market is trending — don't sell vol
+        
+        if atr > 0 and bb_width > atr * self.BB_WIDTH_MAX_ATR:
+            return None  # Bands are too wide — vol is expanding
+        
+        # Price must be inside the range (not breaking out)
+        range_size = resistance - support
+        if range_size <= 0:
+            return None
+        price_in_range = (close - support) / range_size  # 0.0 = at support, 1.0 = at resistance
+        if price_in_range < 0.05 or price_in_range > 0.95:
+            return None  # Too close to edge — potential breakout
+        
+        # ── Pick best grid strike ──
+        result = self._pick_best_strike(close, rsi, atr, support, resistance)
+        if result is None:
+            return None
+        
+        signal_type, strike, delta, option_side = result
+        
+        # Remember which side we just signalled (for alternation)
+        self._last_signal_side = signal_type
+        
+        # ── Compute entry, SL, target ──
+        # Entry price will be overridden by actual option premium from XTS,
+        # but we provide estimates based on distance from ATM
+        entry_price = close  # Placeholder — trading_app will fetch real premium
+        
+        # For SELL orders: SL is above entry (premium rising), target is below (decay)
+        stop_loss = entry_price + (atr * 1.5)
+        # Target = 60% of entry premium captured (premium drops to 40% of entry)
+        target = entry_price * (1.0 - self.profit_target_pct)
+        
+        # Grid metadata for display
+        ce_grid, pe_grid = self._compute_grid(close, atr)
+        grid_label = f"Grid {self.num_strikes}×{self.strike_spacing_pct}%"
+        
+        confidence_base = 0.4
+        # Higher confidence when ADX is very low (strong sideways)
+        confidence_base += max(0, (self.ADX_MAX - adx) / self.ADX_MAX) * 0.25
+        # Higher confidence when BB is very tight
+        if atr > 0:
+            bb_tightness = 1.0 - min(1.0, bb_width / (atr * self.BB_WIDTH_MAX_ATR))
+            confidence_base += bb_tightness * 0.2
+        # Lower confidence near range edges
+        center_dist = abs(price_in_range - 0.5) * 2  # 0=center, 1=edge
+        confidence_base -= center_dist * 0.15
+        confidence = max(0.1, min(1.0, confidence_base))
+        
+        reason = (
+            f"{grid_label} → SELL {option_side} @ strike ~{strike:.0f} | "
+            f"ADX: {adx:.1f}, RSI: {rsi:.1f}, "
+            f"BB Width: {bb_width:.1f} ({bb_width/atr:.1f}× ATR), "
+            f"Range [{support:.0f}-{resistance:.0f}], "
+            f"Δ≈{delta:.2f}, "
+            f"Target: {self.profit_target_pct:.0%} decay"
+        )
+        
+        return {
+            'signal': signal_type,
+            'order_action': 'SELL',
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'target': target,
+            'confidence': confidence,
+            'reason': reason,
+            'atr': atr,
+        }
+    
+    def get_info(self):
+        """Get strategy information"""
+        return self.description
+
+
+class VolumeBreakoutStrategy:
+    """
+    Volume-Based Breakout Strategy
+    Uses volume instead of price to identify breakouts
+    """
+    
+    def __init__(self):
+        self.name = "Volume Breakout"
+        self.description = """
+        <h3>Volume-Based Breakout Strategy</h3>
+        <p><b>Logic:</b></p>
+        <ul>
+            <li><b>Step 1:</b> Calculate 20-period SMA of volume</li>
+            <li><b>Step 2:</b> High Volume Check - Current Volume > 1.5× Avg Volume (else No Trade)</li>
+            <li><b>Step 3:</b> Volume Breakout - Current Volume significantly above 20-period high volume (uses volume instead of price)</li>
+            <li><b>Step 4:</b> Trend Confirmation with 50 EMA</li>
+            <li><b>BUY:</b> Price above 50 EMA with volume breakout</li>
+            <li><b>SELL:</b> Price below 50 EMA with volume breakout</li>
+        </ul>
+        <p><b>Risk/Reward:</b> 1:2 (SL based on ATR)</p>
+        """
+    
+    def calc_atr(self, data, period=14):
+        """Calculate Average True Range"""
+        high_low = data['High'] - data['Low']
+        high_close = np.abs(data['High'] - data['Close'].shift())
+        low_close = np.abs(data['Low'] - data['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        return true_range.rolling(period).mean()
+    
+    def add_indicators(self, df):
+        """Add all technical indicators to dataframe"""
+        # Volume indicators
+        df['AvgVol_20'] = df['Volume'].rolling(window=20).mean()
+        df['Vol_High_20'] = df['Volume'].rolling(window=20).max()
+        
+        # Price indicators
+        df['EMA_50'] = df['Close'].ewm(span=50).mean()
+        df['High_20'] = df['High'].rolling(window=20).max()
+        df['Low_20'] = df['Low'].rolling(window=20).min()
+        
+        # ATR for stop loss
+        df['ATR'] = self.calc_atr(df)
+        
+        return df
+    
+    def get_signal(self, df):
+        """Get current trading signal based on volume breakout"""
+        if len(df) < 60:  # Need at least 60 candles for 50 EMA
+            return None
+        
+        # Add indicators if not present
+        if 'AvgVol_20' not in df.columns:
+            df = self.add_indicators(df)
+        
+        # Get last candle
+        last = df.iloc[-1]
+        
+        # Extract values safely
+        try:
+            close_val = last['Close'].item() if hasattr(last['Close'], 'item') else float(last['Close'])
+            volume_val = last['Volume'].item() if hasattr(last['Volume'], 'item') else float(last['Volume'])
+            avg_vol_20 = last['AvgVol_20'].item() if hasattr(last['AvgVol_20'], 'item') else float(last['AvgVol_20'])
+            vol_high_20 = last['Vol_High_20'].item() if hasattr(last['Vol_High_20'], 'item') else float(last['Vol_High_20'])
+            ema_50 = last['EMA_50'].item() if hasattr(last['EMA_50'], 'item') else float(last['EMA_50'])
+            high_20 = last['High_20'].item() if hasattr(last['High_20'], 'item') else float(last['High_20'])
+            low_20 = last['Low_20'].item() if hasattr(last['Low_20'], 'item') else float(last['Low_20'])
+            atr_val = last['ATR'].item() if hasattr(last['ATR'], 'item') else float(last['ATR'])
+            
+            if pd.isna(avg_vol_20) or pd.isna(ema_50) or pd.isna(atr_val) or pd.isna(vol_high_20):
+                return None
+        except (ValueError, TypeError, KeyError) as e:
+            print(f"[ERROR] Error extracting indicators: {e}")
+            return None
+        
+        # ── STEP 1 & 2: High Volume Check ──
+        # Current Volume must be > 1.5× Average Volume
+        if volume_val < avg_vol_20 * 1.5:
+            # No trade if volume is not high enough
+            return None
+        
+        # ── STEP 3: Volume Breakout Check ──
+        # Instead of price breakout (price > 20-high or < 20-low),
+        # we check if volume breaks above the 20-period high volume
+        # Using volume as the breakout indicator
+        if volume_val < vol_high_20 * 1.2:  # Volume should be 20% above 20-period high
+            # Wait - no breakout
+            return None
+        
+        # ── STEP 4: Trend Confirmation with 50 EMA ──
+        signal_info = None
+        
+        # BUY Signal: Price above 50 EMA (uptrend confirmed)
+        if close_val > ema_50:
+            entry_price = close_val
+            stop_loss = entry_price - atr_val  # 1 ATR stop loss
+            target = entry_price + (atr_val * 2)  # 1:2 risk/reward
+            
+            signal_info = {
+                'signal': 'CALL',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': min(1.0, (close_val - ema_50) / ema_50),
+                'reason': f'Volume Breakout - Vol: {volume_val:.0f} (>{avg_vol_20 * 1.5:.0f}), Price above 50 EMA ({ema_50:.2f})',
+                'atr': atr_val
+            }
+        
+        # SELL Signal: Price below 50 EMA (downtrend confirmed)
+        elif close_val < ema_50:
+            entry_price = close_val
+            stop_loss = entry_price + atr_val  # 1 ATR stop loss
+            target = entry_price - (atr_val * 2)  # 1:2 risk/reward
+            
+            signal_info = {
+                'signal': 'PUT',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target,
+                'confidence': min(1.0, (ema_50 - close_val) / ema_50),
+                'reason': f'Volume Breakout - Vol: {volume_val:.0f} (>{avg_vol_20 * 1.5:.0f}), Price below 50 EMA ({ema_50:.2f})',
+                'atr': atr_val
+            }
+        
+        return signal_info
+    
+    def get_info(self):
+        """Get strategy information"""
+        return self.description

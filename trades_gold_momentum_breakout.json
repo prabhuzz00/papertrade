@@ -16,6 +16,7 @@
       "strike": 158000,
       "option_type": "CE",
       "spot_price": 157650.0,
+      "order_action": "BUY",
       "exit_price": 4193.5,
       "exit_time": "2026-02-12T18:13:31.511805",
       "status": "STOP_LOSS",

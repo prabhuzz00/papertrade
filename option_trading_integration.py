@@ -8,7 +8,8 @@ signal generation strategies (Bollinger+MACD, ORB, Sideways, etc.)
 from nifty_option_trader import NiftyOptionTrader
 from strategy_wrappers import (BollingerMACDStrategy, 
                                OpeningRangeBreakoutStrategy, 
-                               SidewaysStrategy)
+                               SidewaysStrategy,
+                               OptionBuySellStrategy)
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -28,7 +29,8 @@ class OptionTradingSystem:
         self.strategies = {
             'Bollinger+MACD': BollingerMACDStrategy(),
             'Opening Range Breakout': OpeningRangeBreakoutStrategy(),
-            'Sideways Market': SidewaysStrategy()
+            'Sideways Market': SidewaysStrategy(),
+            'Option Buy/Sell': OptionBuySellStrategy(),
         }
         
         # Track last signal per strategy to avoid duplicate trades
@@ -71,22 +73,39 @@ class OptionTradingSystem:
                 signal = strategy.predict(df)
                 signals[strategy_name] = signal
                 
-                # Execute option trade if signal is valid and different from last
-                if signal in ['CALL', 'PUT'] and signal != self.last_signals[strategy_name]:
+                # Check if signal is a dict (new format with order_action)
+                if isinstance(signal, dict) and 'signal' in signal:
+                    signal_type = signal['signal']
+                    order_action = signal.get('order_action', 'BUY')
+                    signal_key = f"{order_action}_{signal_type}"
+                    
+                    if signal_key != self.last_signals.get(strategy_name):
+                        print(f"\n🔔 NEW SIGNAL: {order_action} {signal_type} from {strategy_name}")
+                        
+                        trade = self.option_trader.execute_signal(
+                            signal_type, strategy_name, order_action=order_action
+                        )
+                        
+                        if trade:
+                            self.last_signals[strategy_name] = signal_key
+                            print(f"✓ Trade executed via {strategy_name}")
+                        else:
+                            print(f"✗ Trade execution failed")
+                
+                # Legacy format: signal is 'CALL', 'PUT', or 'HOLD'
+                elif signal in ['CALL', 'PUT'] and signal != self.last_signals[strategy_name]:
                     print(f"\n🔔 NEW SIGNAL: {signal} from {strategy_name}")
                     
-                    # Execute option trade
                     trade = self.option_trader.execute_signal(signal, strategy_name)
                     
                     if trade:
-                        # Update last signal
                         self.last_signals[strategy_name] = signal
                         print(f"✓ Trade executed via {strategy_name}")
                     else:
                         print(f"✗ Trade execution failed")
                 
                 # Reset last signal if no signal
-                elif signal == 'HOLD':
+                elif signal == 'HOLD' or signal is None:
                     self.last_signals[strategy_name] = None
                     
             except Exception as e:
